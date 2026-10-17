@@ -9,6 +9,7 @@ __pycache__/
 # Logs / outputs
 *.log
 *.out
+*.err
 *.tmp
 *.bak
 nohup.out
