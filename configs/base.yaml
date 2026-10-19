@@ -19,7 +19,7 @@ output_folder_name: 'experiments'
 start_pose: [565, 1801]
 
 #modes_to_test: ['nearest', 'nbv-2d', 'onlyvar', 'visunk', 'visvar', 'mapex', 'upen', 'hectoraug', 'pipe', 'pw-nbv-2d'] #all methods
-modes_to_test: ['pipe']
+modes_to_test: ['nearest']
 
 log_iou: false
 mission_time: 1000

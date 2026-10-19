@@ -59,3 +59,10 @@ install/
 # OS generated files
 .DS_Store
 Thumbs.db
+
+# new dataset png files
+/DatasetWithSplit2/
+
+#ignore large files (over 100MB)
+kth_test_maps/Train_asia_china_T3_floor_3/occ_map.npy
+kth_test_maps/Train_asia_china_T3_floor_3/valid_space.npy
