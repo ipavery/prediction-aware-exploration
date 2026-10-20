@@ -279,7 +279,7 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
             mean_map = None
             lama_reduced_pred_var = None 
             padded_gt_map = None
-        elif mode in ['nbv-2d', 'pw-nbv-2d']:
+        elif mode in ['nearest', 'nbv-2d', 'pw-nbv-2d']:
             plt_row = 2
             plt_col = 1
             fig, ax = plt.subplots(plt_row, plt_col, figsize=(15, 10))
