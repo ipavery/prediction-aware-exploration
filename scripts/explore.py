@@ -204,6 +204,10 @@ def run_exploration_comparison_for_map(args):
     unknown_as_occ = args['unknown_as_occ']
     use_distance_transform_for_planning = args['use_distance_transform_for_planning']
     upen_config  = args['upen_config']
+    max_steps = args.get('max_steps')
+    target_known_fraction = args.get('target_known_fraction')
+    training_data_root = args.get('training_data_root')
+    sample_name = args.get('sample_name')
     print("Running exploration comparison for map: ", map_folder_path)
     
     # Load in occupancy map and valid space map
@@ -233,10 +237,13 @@ def run_exploration_comparison_for_map(args):
         
     for mode in modes_to_test:
         run_exploration_for_map(occ_map, comp_exp_title, models_list, lama_model, lama_map_transform, pred_vis_configs, lidar_sim_configs, mode, start_pose, unknown_as_occ, \
-            use_distance_transform_for_planning=use_distance_transform_for_planning, upen_config=upen_config)
+            use_distance_transform_for_planning=use_distance_transform_for_planning, upen_config=upen_config,
+                max_steps=max_steps, target_known_fraction=target_known_fraction,
+                training_data_root=training_data_root, sample_name=sample_name)
 
 def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model, lama_map_transform, pred_vis_configs, lidar_sim_configs, mode, \
-    start_pose, unknown_as_occ, use_distance_transform_for_planning, upen_config=None):
+    start_pose, unknown_as_occ, use_distance_transform_for_planning, upen_config=None, max_steps=None,
+            target_known_fraction=None, training_data_root=None, sample_name=None):
     try: 
         print("exp_title:", exp_title)
         start_exp_time = time.time()
@@ -360,7 +367,8 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
             category = 'medium'
 
         # Choose the appropriate time step based on whether logging is enabled
-        time_step = time_settings[category][0] if collect_opts.log_iou else time_settings[category][1]
+        default_time_step = time_settings[category][0] if collect_opts.log_iou else time_settings[category][1]
+        time_step = max_steps if max_steps is not None else default_time_step
 
         iou_90_flag = False
         iou_95_flag = False
@@ -845,6 +853,12 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                 # if (t % 99) == 0:
                 #print("Total time for step {} is {} seconds".format(t, np.round(time.time() - start_mission_i_time, 2)))
                 t += 1
+                if target_known_fraction is not None:
+                    interior_obs_map = mapper.obs_map[pd_size:-pd_size, pd_size:-pd_size]
+                    known_fraction = np.mean(interior_obs_map != 0.5)
+                    if known_fraction >= target_known_fraction:
+                        print(f"Reached {known_fraction:.1%} known interior cells after {t} steps")
+                        break
 
             #TODO:  Save final mission status 
             if mission_failed:
@@ -854,6 +868,24 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
             else:
                 update_mission_status(start_time=start_exp_time, cur_step=t, mission_complete=True, fail_reason="", mission_status_save_path=mission_status_save_path)
                 print("\033[94mMission complete for {}!\033[0m".format(exp_title))
+
+        if training_data_root is not None and mode == 'nearest':
+            split_dir = os.path.join(training_data_root, 'train_3')
+            global_gt_dir = os.path.join(split_dir, 'global_gt')
+            global_obs_dir = os.path.join(split_dir, 'global_obs')
+            os.makedirs(global_gt_dir, exist_ok=True)
+            os.makedirs(global_obs_dir, exist_ok=True)
+
+            gt_path = os.path.join(global_gt_dir, f'{sample_name}.png')
+            obs_path = os.path.join(global_obs_dir, f'{sample_name}.png')
+            gt_written = cv2.imwrite(gt_path, smu.convert_01_single_channel_to_0_255_3_channel(mapper.gt_map))
+            obs_written = cv2.imwrite(obs_path, smu.convert_01_single_channel_to_0_255_3_channel(mapper.obs_map))
+            if not gt_written or not obs_written:
+                raise IOError(f"Failed to save training pair {sample_name}")
+
+            interior_obs_map = mapper.obs_map[pd_size:-pd_size, pd_size:-pd_size]
+            known_fraction = np.mean(interior_obs_map != 0.5)
+            print(f"Saved training pair {sample_name}: {t} frontier steps, {known_fraction:.1%} known interior cells")
     except Exception as e:
         print("\033[93mMission failed with exception for {}!\033[0m".format(exp_title))
         print(e)
@@ -884,6 +916,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--collect_world_list', nargs='+', help='List of worlds to collect data from')
     parser.add_argument('--start_pose', nargs='+', help='List of start pose')
+    parser.add_argument('--num_data_per_world', type=int, help='Number of independent runs for each selected map')
+    parser.add_argument('--max_steps', type=int, help='Maximum frontier steps per run')
+    parser.add_argument('--target_known_fraction', type=float, help='Stop after this fraction of the map interior is observed')
+    parser.add_argument('--training_data_root', help='Optional root directory for LaMa training pairs')
     args = parser.parse_args()
     
     # Auto-detect root path (PIPE directory is parent of scripts directory)
@@ -899,6 +935,14 @@ if __name__ == '__main__':
         for pose_elem in args.start_pose:
             start_pose.append(int(pose_elem))
         collect_opts.start_pose = start_pose
+    if args.num_data_per_world is not None:
+        if args.num_data_per_world < 1:
+            parser.error('--num_data_per_world must be at least 1')
+        collect_opts.num_data_per_world = args.num_data_per_world
+    if args.max_steps is not None and args.max_steps < 1:
+        parser.error('--max_steps must be at least 1')
+    if args.target_known_fraction is not None and not 0 < args.target_known_fraction <= 1:
+        parser.error('--target_known_fraction must be greater than 0 and at most 1')
 
     kth_map_folder_path = os.path.join(root_path, 'kth_test_maps')
     kth_map_paths = os.listdir(kth_map_folder_path)
@@ -937,7 +981,8 @@ if __name__ == '__main__':
     lama_map_transform = get_lama_transform(collect_opts.lama_transform_variant, collect_opts.lama_out_size)
 
     run_exploration_args = []
-    for kth_map_folder_path in kth_map_folder_paths:
+    collection_id = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    for sample_index, kth_map_folder_path in enumerate(kth_map_folder_paths):
         args_dict = {
             'map_folder_path': kth_map_folder_path,
             'models_list': model_list,
@@ -949,7 +994,11 @@ if __name__ == '__main__':
             'modes_to_test': collect_opts.modes_to_test,
             'unknown_as_occ': collect_opts.unknown_as_occ,
             'use_distance_transform_for_planning': collect_opts.use_distance_transform_for_planning,
-            'upen_config': collect_opts.upen_config
+            'upen_config': collect_opts.upen_config,
+            'max_steps': args.max_steps,
+            'target_known_fraction': args.target_known_fraction,
+            'training_data_root': args.training_data_root,
+            'sample_name': f'{collection_id}_sample_{sample_index:06d}'
         }
         run_exploration_args.append(args_dict)
     
