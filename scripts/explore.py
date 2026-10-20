@@ -46,6 +46,8 @@ def get_options_dict_from_yml(config_name):
     return options
 
 def update_mission_status(start_time, cur_step, mission_complete, fail_reason, mission_status_save_path):
+    if mission_status_save_path is None:
+        return
     mission_status = {}
     mission_status['start_time'] = start_time
     mission_status["cur_step"] = cur_step
@@ -208,6 +210,7 @@ def run_exploration_comparison_for_map(args):
     target_known_fraction = args.get('target_known_fraction')
     training_data_root = args.get('training_data_root')
     sample_name = args.get('sample_name')
+    save_experiment_artifacts = args.get('save_experiment_artifacts', True)
     print("Running exploration comparison for map: ", map_folder_path)
     
     # Load in occupancy map and valid space map
@@ -224,11 +227,12 @@ def run_exploration_comparison_for_map(args):
         start_pose = smu.sample_free_position_given_buffer(occ_map, validspace_map, buffer_start_pose)
         assert start_pose is not None, "Could not sample start pose"
 
-    plt.imshow(occ_map)
-    plt.scatter(start_pose[1], start_pose[0], c='r', s=10, marker='*')
-    plt.title('GT Map (Red: Start Pose)')
-    plt.savefig('gt_map.png')
-    plt.close()
+    if save_experiment_artifacts:
+        plt.imshow(occ_map)
+        plt.scatter(start_pose[1], start_pose[0], c='r', s=10, marker='*')
+        plt.title('GT Map (Red: Start Pose)')
+        plt.savefig('gt_map.png')
+        plt.close()
         
     # get overall experiment name
     # exp_title based on start time YYYYMMDD_HHMMSS, and name of map
@@ -239,11 +243,13 @@ def run_exploration_comparison_for_map(args):
         run_exploration_for_map(occ_map, comp_exp_title, models_list, lama_model, lama_map_transform, pred_vis_configs, lidar_sim_configs, mode, start_pose, unknown_as_occ, \
             use_distance_transform_for_planning=use_distance_transform_for_planning, upen_config=upen_config,
                 max_steps=max_steps, target_known_fraction=target_known_fraction,
-                training_data_root=training_data_root, sample_name=sample_name)
+                training_data_root=training_data_root, sample_name=sample_name,
+                save_experiment_artifacts=save_experiment_artifacts)
 
 def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model, lama_map_transform, pred_vis_configs, lidar_sim_configs, mode, \
     start_pose, unknown_as_occ, use_distance_transform_for_planning, upen_config=None, max_steps=None,
-            target_known_fraction=None, training_data_root=None, sample_name=None):
+            target_known_fraction=None, training_data_root=None, sample_name=None,
+            save_experiment_artifacts=True):
     try: 
         print("exp_title:", exp_title)
         start_exp_time = time.time()
@@ -257,18 +263,17 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
 
         # Create a new directory for experiment/exp_title
         exp_title = exp_title + '_' + mode
-        exp_dir = os.path.join(output_root_dir, exp_title)
-        if not os.path.exists(exp_dir):
-            os.makedirs(exp_dir)
+        if save_experiment_artifacts:
+            exp_dir = os.path.join(output_root_dir, exp_title)
+            os.makedirs(exp_dir, exist_ok=True)
 
-        # Create subdirectory (global_obs, run_viz) and save paths
-        global_obs_dir = os.path.join(exp_dir, 'global_obs')
-        run_viz_dir = os.path.join(exp_dir, 'run_viz')
-        for dir_path in [global_obs_dir, run_viz_dir]:
-            if not os.path.exists(dir_path):
-                os.makedirs(dir_path)
-        gt_map_save_path = os.path.join(exp_dir, 'gt_map.png')
-        odom_npy_save_path = os.path.join(exp_dir, 'odom.npy')
+            # Create subdirectory (global_obs, run_viz) and save paths
+            global_obs_dir = os.path.join(exp_dir, 'global_obs')
+            run_viz_dir = os.path.join(exp_dir, 'run_viz')
+            os.makedirs(global_obs_dir, exist_ok=True)
+            os.makedirs(run_viz_dir, exist_ok=True)
+            gt_map_save_path = os.path.join(exp_dir, 'gt_map.png')
+            odom_npy_save_path = os.path.join(exp_dir, 'odom.npy')
 
 
         # Visualization Setup 
@@ -302,7 +307,7 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
             raise ValueError(f"Unknown method: {mode}")
 
         # Initialize mission status save path
-        mission_status_save_path = os.path.join(exp_dir, 'mission_status.json')
+        mission_status_save_path = os.path.join(exp_dir, 'mission_status.json') if save_experiment_artifacts else None
         mission_failed = False
         update_mission_status(start_time=start_exp_time, cur_step=0, mission_complete=False, fail_reason="", mission_status_save_path=mission_status_save_path)
 
@@ -331,14 +336,16 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
             pad_w2 = 16-pad_w - pad_w1
 
         # initial saves (gt_map, pose_list)
-        cv2.imwrite(gt_map_save_path, smu.convert_01_single_channel_to_0_255_3_channel(mapper.gt_map))
-        np.save(odom_npy_save_path, pose_list)
+        if save_experiment_artifacts:
+            cv2.imwrite(gt_map_save_path, smu.convert_01_single_channel_to_0_255_3_channel(mapper.gt_map))
+            np.save(odom_npy_save_path, pose_list)
 
         locked_frontier_center = None
         
         ### Main Loop
         # Create a timestamp string with date and time, e.g. "20250319_155031"
-        if collect_opts.log_iou:
+        log_iou = collect_opts.log_iou and save_experiment_artifacts
+        if log_iou:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_subdirectory_name = f"{timestamp}_test"
 
@@ -367,17 +374,19 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
             category = 'medium'
 
         # Choose the appropriate time step based on whether logging is enabled
-        default_time_step = time_settings[category][0] if collect_opts.log_iou else time_settings[category][1]
+        default_time_step = time_settings[category][0] if log_iou else time_settings[category][1]
         time_step = max_steps if max_steps is not None else default_time_step
 
         iou_90_flag = False
         iou_95_flag = False
-        context = open(iou_log_file, "a") if collect_opts.log_iou else dummy_context_manager()
+        context = open(iou_log_file, "a") if log_iou else dummy_context_manager()
 
         with context as log_file:
             for t in range(time_step):
                 start_mission_i_time = time.time()
-                show_plt = (t % collect_opts.show_plt_freq == 0) or (t == collect_opts.mission_time - 1)
+                show_plt = save_experiment_artifacts and (
+                    (t % collect_opts.show_plt_freq == 0) or (t == collect_opts.mission_time - 1)
+                )
                 
                 # Frontier detection
                 if t == 0:
@@ -831,9 +840,9 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
 
                 # Save obs map and pose list 
                 # Save obs map 
-                cv2.imwrite(global_obs_dir + '/{}.png'.format(str(t).zfill(8)), smu.convert_01_single_channel_to_0_255_3_channel(mapper.obs_map))
-                # Save pose list
-                np.save(odom_npy_save_path, pose_list)
+                if save_experiment_artifacts:
+                    cv2.imwrite(global_obs_dir + '/{}.png'.format(str(t).zfill(8)), smu.convert_01_single_channel_to_0_255_3_channel(mapper.obs_map))
+                    np.save(odom_npy_save_path, pose_list)
                 
                 # # Go to next pose
                 # start_time = time.time()
@@ -878,8 +887,14 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
 
             gt_path = os.path.join(global_gt_dir, f'{sample_name}.png')
             obs_path = os.path.join(global_obs_dir, f'{sample_name}.png')
-            gt_written = cv2.imwrite(gt_path, smu.convert_01_single_channel_to_0_255_3_channel(mapper.gt_map))
-            obs_written = cv2.imwrite(obs_path, smu.convert_01_single_channel_to_0_255_3_channel(mapper.obs_map))
+            gt_train_map = mapper.gt_map[pd_size:-pd_size, pd_size:-pd_size]
+            obs_train_map = mapper.obs_map[pd_size:-pd_size, pd_size:-pd_size]
+            gt_written = cv2.imwrite(
+                gt_path, smu.convert_01_single_channel_to_0_255_3_channel(gt_train_map)
+            )
+            obs_written = cv2.imwrite(
+                obs_path, smu.convert_01_single_channel_to_0_255_3_channel(obs_train_map)
+            )
             if not gt_written or not obs_written:
                 raise IOError(f"Failed to save training pair {sample_name}")
 
@@ -915,11 +930,13 @@ if __name__ == '__main__':
     output_subdirectory_name = str(today.year)+"{:02d}".format(today.month)+"{:02d}".format(today.day)+'_test'
     parser = argparse.ArgumentParser()
     parser.add_argument('--collect_world_list', nargs='+', help='List of worlds to collect data from')
+    parser.add_argument('--map_dir', help='Directory containing map subdirectories with occ_map.npy and valid_space.npy')
     parser.add_argument('--start_pose', nargs='+', help='List of start pose')
     parser.add_argument('--num_data_per_world', type=int, help='Number of independent runs for each selected map')
     parser.add_argument('--max_steps', type=int, help='Maximum frontier steps per run')
     parser.add_argument('--target_known_fraction', type=float, help='Stop after this fraction of the map interior is observed')
     parser.add_argument('--training_data_root', help='Optional root directory for LaMa training pairs')
+    parser.add_argument('--no_experiment_artifacts', action='store_true', help='Skip experiment images, trajectories, and status files')
     args = parser.parse_args()
     
     # Auto-detect root path (PIPE directory is parent of scripts directory)
@@ -944,22 +961,31 @@ if __name__ == '__main__':
     if args.target_known_fraction is not None and not 0 < args.target_known_fraction <= 1:
         parser.error('--target_known_fraction must be greater than 0 and at most 1')
 
-    kth_map_folder_path = os.path.join(root_path, 'kth_test_maps')
-    kth_map_paths = os.listdir(kth_map_folder_path)
+    if args.map_dir is not None:
+        map_root_dir = os.path.abspath(args.map_dir)
+        if not os.path.isdir(map_root_dir):
+            parser.error(f'--map_dir is not a directory: {map_root_dir}')
+        kth_map_folder_paths = sorted(
+            entry.path for entry in os.scandir(map_root_dir)
+            if entry.is_dir()
+            and os.path.isfile(os.path.join(entry.path, 'occ_map.npy'))
+            and os.path.isfile(os.path.join(entry.path, 'valid_space.npy'))
+        )
+    else:
+        map_root_dir = os.path.join(root_path, 'kth_test_maps')
+        map_ids = os.listdir(map_root_dir)
+        if collect_opts.collect_world_list is not None:
+            map_ids = [map_id for map_id in map_ids if map_id in collect_opts.collect_world_list]
+        kth_map_folder_paths = [os.path.join(map_root_dir, map_id) for map_id in map_ids]
+        kth_map_folder_paths *= collect_opts.num_data_per_world
 
-    if collect_opts.collect_world_list is not None:
-        kth_map_paths_collect = []
-        for folder_name in kth_map_paths:
-            if folder_name in collect_opts.collect_world_list:
-                kth_map_paths_collect.append(folder_name)
-        kth_map_paths = kth_map_paths_collect
-
-    kth_map_folder_paths = [os.path.join(kth_map_folder_path, p) for p in kth_map_paths] * collect_opts.num_data_per_world
+    if not kth_map_folder_paths:
+        parser.error('No map directories with occ_map.npy and valid_space.npy were found')
 
     # Make output_subdirectory_name if it doesn't exist 
     output_root_dir = os.path.join(root_path, collect_opts.output_folder_name, output_subdirectory_name)
-    if not os.path.exists(output_root_dir):
-        os.makedirs(output_root_dir)
+    if not args.no_experiment_artifacts:
+        os.makedirs(output_root_dir, exist_ok=True)
     
     model_list = []
     device = collect_opts.lama_device
@@ -998,10 +1024,10 @@ if __name__ == '__main__':
             'max_steps': args.max_steps,
             'target_known_fraction': args.target_known_fraction,
             'training_data_root': args.training_data_root,
+            'save_experiment_artifacts': not args.no_experiment_artifacts,
             'sample_name': f'{collection_id}_sample_{sample_index:06d}'
         }
         run_exploration_args.append(args_dict)
     
     for run_exploration_arg in run_exploration_args:
         run_exploration_comparison_for_map(run_exploration_arg)
-
