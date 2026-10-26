@@ -62,6 +62,7 @@ Thumbs.db
 
 # new dataset png files
 /DatasetWithSplit2/
+train_maps
 
 #ignore large files (over 100MB)
 kth_test_maps/Train_asia_china_T3_floor_3/occ_map.npy

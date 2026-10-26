@@ -7,8 +7,10 @@
 #SBATCH --mem=16G
 #SBATCH --gres=gpu:1
 #SBATCH --qos=test
-#SBATCH --output=lama-pairs-%j.out
-#SBATCH --error=lama-pairs-%j.err
+#SBATCH --output=logs/lama-pairs-%j.out
+#SBATCH --error=logs/lama-pairs-%j.err
+#SBATCH --mail-user=ipa28@byu.edu
+#SBATCH --mail-type=BEGIN,END,FAIL,REQUEUE
 
 set -eo pipefail
 
