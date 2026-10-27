@@ -12,6 +12,8 @@
 #SBATCH --mail-user=ipa28@byu.edu
 #SBATCH --mail-type=BEGIN,END,FAIL,REQUEUE
 
+# usage: sbatch --export=ALL,MAPS_DIR=/home/ipa28/prediction-aware-exploration/train_maps,DATA_ROOT="$HOME/nobackup/autodelete/lama_map_pairs" collect_lama_pairs.sbatch
+
 set -eo pipefail
 
 # Submit this job from the prediction-aware-exploration repository root.
