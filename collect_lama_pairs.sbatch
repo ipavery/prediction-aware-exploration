@@ -133,8 +133,11 @@ echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-unset}"
 cd "$REPO_ROOT/scripts"
 python -u - "$MAPS_DIR" "$DATA_ROOT" "$MAX_STEPS" "$TARGET_KNOWN_FRACTION" <<'PY'
 import matplotlib
+import os
 import runpy
 import sys
+
+import cv2
 
 matplotlib.use("Agg")
 matplotlib.use = lambda *args, **kwargs: None
@@ -147,22 +150,25 @@ sys.argv = [
     "--training_data_root", data_root,
     "--no_experiment_artifacts",
 ]
-runpy.run_path("explore.py", run_name="__main__")
-PY
+collection = runpy.run_path("explore.py", run_name="__main__")
 
-shopt -s nullglob
-GT_PAIRS=("$DATA_ROOT"/train_3/global_gt/*.png)
-OBS_PAIRS=("$DATA_ROOT"/train_3/global_obs/*.png)
-if [[ ${#GT_PAIRS[@]} -ne "$MAP_COUNT" || ${#OBS_PAIRS[@]} -ne "$MAP_COUNT" ]]; then
-    echo "ERROR: Expected $MAP_COUNT pairs, found ${#GT_PAIRS[@]} GT and ${#OBS_PAIRS[@]} observed maps."
-    exit 1
-fi
-for index in "${!GT_PAIRS[@]}"; do
-    if [[ "$(basename "${GT_PAIRS[$index]}")" != "$(basename "${OBS_PAIRS[$index]}")" ]]; then
-        echo "ERROR: GT/observed filenames do not pair: ${GT_PAIRS[$index]} and ${OBS_PAIRS[$index]}"
-        exit 1
-    fi
-done
+# Validate exactly this invocation's samples, even when DATA_ROOT has older pairs.
+expected_samples = [item['sample_name'] for item in collection['run_exploration_args']]
+failures = []
+for sample_name in expected_samples:
+    gt_path = os.path.join(data_root, 'train_3', 'global_gt', sample_name + '.png')
+    obs_path = os.path.join(data_root, 'train_3', 'global_obs', sample_name + '.png')
+    gt = cv2.imread(gt_path) if os.path.isfile(gt_path) else None
+    obs = cv2.imread(obs_path) if os.path.isfile(obs_path) else None
+    if gt is None or obs is None:
+        failures.append(sample_name + ': missing or unreadable GT/observation')
+    elif gt.shape != obs.shape:
+        failures.append(sample_name + ': GT/observation dimensions differ')
+if failures:
+    raise SystemExit('ERROR: Incomplete collection:\n' + '\n'.join(failures))
+print('Validated {} pairs from collection {}'.format(
+    len(expected_samples), collection['collection_id']))
+PY
 
 echo "LaMa pair collection finished. Data: $DATA_ROOT/train_3"
 echo "Expected pairs: $MAP_COUNT"

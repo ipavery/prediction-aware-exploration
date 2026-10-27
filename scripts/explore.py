@@ -100,28 +100,60 @@ def reselect_frontier_from_frontier_region_centers(frontier_region_centers, tota
     
     # First check if we have any frontiers left
     if len(frontier_region_centers) == 0:
-        mission_failed = True
         update_mission_status(start_time=start_exp_time, cur_step=t, mission_complete=False, fail_reason="frontier_region_centers", mission_status_save_path=mission_status_save_path)
-        return frontier_selected, None, None, None
+        return frontier_selected, None, frontier_region_centers, total_cost
     
     # Find the minimum cost index
     min_cost_idx = np.argmin(total_cost)
     
     # Store the minimum cost frontier before deletion
-    locked_frontier_center = frontier_region_centers[min_cost_idx]
+    locked_frontier_center = np.array(frontier_region_centers[min_cost_idx], copy=True)
     
     # Remove the selected frontier and its cost
     frontier_region_centers = np.delete(frontier_region_centers, min_cost_idx, axis=0)
     total_cost = np.delete(total_cost, min_cost_idx, axis=0)
     
-    # Check if we have any frontiers left after deletion
-    if len(frontier_region_centers) == 0:
-        mission_failed = True
-        update_mission_status(start_time=start_exp_time, cur_step=t, mission_complete=False, fail_reason="frontier_region_centers", mission_status_save_path=mission_status_save_path)
-        return frontier_selected, None, None, None
-    
+    # The selected frontier remains usable even if no alternatives remain.
     frontier_selected = True
     return frontier_selected, locked_frontier_center, frontier_region_centers, total_cost
+
+
+def save_lama_training_pair(mapper, training_data_root, sample_name, steps_completed,
+                            padding=500, phase='final'):
+    """Save the latest observation, preserving a previous pair if encoding fails."""
+    if not sample_name:
+        raise ValueError('A sample_name is required for LaMa training pairs')
+    gt_train_map = mapper.gt_map[padding:-padding, padding:-padding] if padding else mapper.gt_map
+    obs_train_map = mapper.obs_map[padding:-padding, padding:-padding] if padding else mapper.obs_map
+    if gt_train_map.size == 0 or gt_train_map.shape != obs_train_map.shape:
+        raise ValueError('Expected matching nonempty GT and observation interiors')
+    split_dir = os.path.join(training_data_root, 'train_3')
+    gt_dir = os.path.join(split_dir, 'global_gt')
+    obs_dir = os.path.join(split_dir, 'global_obs')
+    os.makedirs(gt_dir, exist_ok=True)
+    os.makedirs(obs_dir, exist_ok=True)
+    gt_path = os.path.join(gt_dir, '{}.png'.format(sample_name))
+    obs_path = os.path.join(obs_dir, '{}.png'.format(sample_name))
+    gt_temp = os.path.join(gt_dir, '.{}.tmp.png'.format(sample_name))
+    obs_temp = os.path.join(obs_dir, '.{}.tmp.png'.format(sample_name))
+    try:
+        gt_image = np.rint(smu.convert_01_single_channel_to_0_255_3_channel(gt_train_map)).astype(np.uint8)
+        obs_image = np.rint(smu.convert_01_single_channel_to_0_255_3_channel(obs_train_map)).astype(np.uint8)
+        if not cv2.imwrite(gt_temp, gt_image):
+            raise IOError('Failed to encode training GT {}'.format(sample_name))
+        if not cv2.imwrite(obs_temp, obs_image):
+            raise IOError('Failed to encode training observation {}'.format(sample_name))
+        # GT is constant throughout a run. Replace only after both encodes work.
+        os.replace(gt_temp, gt_path)
+        os.replace(obs_temp, obs_path)
+    finally:
+        for path in (gt_temp, obs_temp):
+            if os.path.exists(path):
+                os.remove(path)
+    known_fraction = float(np.mean(obs_train_map != 0.5))
+    print('Saved {} training pair {}: {} frontier steps, {:.1%} known interior cells'.format(
+        phase, sample_name, steps_completed, known_fraction), flush=True)
+
 
 def determine_local_planner(mode):
     if mode == 'upen':
@@ -250,7 +282,15 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
     start_pose, unknown_as_occ, use_distance_transform_for_planning, upen_config=None, max_steps=None,
             target_known_fraction=None, training_data_root=None, sample_name=None,
             save_experiment_artifacts=True):
-    try: 
+    t = 0
+    steps_completed = 0
+    mapper = None
+    initial_observation_ready = False
+    mission_status_save_path = None
+    fig = None
+    pd_size = 500 #padding_size; padded pixels for raycast at the boundary of map
+    collect_training_pair = training_data_root is not None and mode == 'nearest'
+    try:
         print("exp_title:", exp_title)
         start_exp_time = time.time()
         pixel_per_meter = lidar_sim_configs['pixel_per_meter']
@@ -280,12 +320,13 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
         if mode in ['pipe', 'mapex']:
             plt_row = 2
             plt_col = 2
-            fig, ax = plt.subplots(plt_row, plt_col, figsize=(20, 10))
-            ax_flatten = ax.flatten()
-            ax_gt = ax_flatten[0]
-            ax_obs = ax_flatten[1]
-            ax_pred_var = ax_flatten[2]
-            ax_mean_map = ax_flatten[3]
+            if save_experiment_artifacts:
+                fig, ax = plt.subplots(plt_row, plt_col, figsize=(20, 10))
+                ax_flatten = ax.flatten()
+                ax_gt = ax_flatten[0]
+                ax_obs = ax_flatten[1]
+                ax_pred_var = ax_flatten[2]
+                ax_mean_map = ax_flatten[3]
             pred_maputils = None
             var_map = None
             mean_map = None
@@ -294,10 +335,11 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
         elif mode in ['nearest', 'nbv-2d', 'pw-nbv-2d']:
             plt_row = 2
             plt_col = 1
-            fig, ax = plt.subplots(plt_row, plt_col, figsize=(15, 10))
-            ax_flatten = ax.flatten()
-            ax_gt = ax_flatten[0]
-            ax_obs = ax_flatten[1]
+            if save_experiment_artifacts:
+                fig, ax = plt.subplots(plt_row, plt_col, figsize=(15, 10))
+                ax_flatten = ax.flatten()
+                ax_gt = ax_flatten[0]
+                ax_obs = ax_flatten[1]
             pred_maputils = None
             var_map = None
             mean_map = None
@@ -314,10 +356,14 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
         #initial observation
         cur_pose = start_pose
         mapper.observe_and_accumulate_given_pose(cur_pose)
+        initial_observation_ready = True
+        if collect_training_pair:
+            # Keep a usable pair on disk before frontier detection or planning.
+            save_lama_training_pair(mapper, training_data_root, sample_name,
+                                    steps_completed, padding=pd_size, phase='initial')
         ind_to_move_per_step = 3
         pose_list = np.atleast_2d(cur_pose) # Assumes last pose is the current pose
 
-        pd_size = 500 #padding_size; padded pixels for raycast at the boundary of map
         #there is a small offset between observed map size and lama prediction output size
         gt_h, gt_w = mapper.gt_map.shape[0],mapper.gt_map.shape[1]
         pad_h = gt_h%16
@@ -445,7 +491,7 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                         need_new_locked_frontier = not is_locked_frontier_center_valid(locked_frontier_center, occ_grid_pyastar, cur_pose, collect_opts, pixel_per_meter)
                                     
                     if need_new_locked_frontier:
-                        show_plt = True
+                        show_plt = save_experiment_artifacts
                                                         
                         # Predict map -----
                         pred_maputils = None
@@ -516,6 +562,10 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                         else:
                             #frontier-based methods: recalculate all frontier center scores
                             frontier_region_centers_unscored, filtered_map, num_large_regions = frontier_planner.get_frontier_centers_given_obs_map(mapper.obs_map)
+                            if len(frontier_region_centers_unscored) == 0:
+                                mission_failed = True
+                                update_mission_status(start_time=start_exp_time, cur_step=t, mission_complete=False, fail_reason="frontier_region_no_large_region", mission_status_save_path=mission_status_save_path)
+                                break
                             
 
                             if mode in ['pipe', 'pw-nbv-2d']: # Do pathwise method
@@ -574,10 +624,18 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                             raise ValueError("Invalid mode: {}, mode not available for getting init_frontier_value".format(mode))
                         cost_transform_map = get_hector_exploration_transform_map(mapper.obs_map, frontier_region_centers, init_cost=danger_transform_map, mode=mode, infogain_val_list=init_frontier_value, info_gain_weight=200)
 
+                # A break in frontier reselection exits only its inner loop.
+                if mission_failed:
+                    break
+
                 # Local planning
                 chosen_local_planner = determine_local_planner(mode) # astar or gradient
                 
                 if chosen_local_planner == 'astar':
+                    if locked_frontier_center is None:
+                        mission_failed = True
+                        update_mission_status(start_time=start_exp_time, cur_step=t, mission_complete=False, fail_reason="frontier_region_centers", mission_status_save_path=mission_status_save_path)
+                        break
                     path = pyastar2d.astar_path(occ_grid_pyastar, cur_pose, locked_frontier_center, allow_diagonal=False)
                     while path is None:
                         frontier_selected, locked_frontier_center, frontier_region_centers, frontier_cost_list = reselect_frontier_from_frontier_region_centers(frontier_region_centers, frontier_cost_list, t, start_exp_time, mission_status_save_path)
@@ -585,6 +643,8 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                             mission_failed = True
                             update_mission_status(start_time=start_exp_time, cur_step=t, mission_complete=False, fail_reason="frontier_region_centers", mission_status_save_path=mission_status_save_path)
                             break
+                        if not is_locked_frontier_center_valid(locked_frontier_center, occ_grid_pyastar, cur_pose, collect_opts, pixel_per_meter):
+                            continue
                         path = pyastar2d.astar_path(occ_grid_pyastar, cur_pose, locked_frontier_center, allow_diagonal=False)
                     if mission_failed:
                         break
@@ -601,7 +661,7 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                 else:
                     raise ValueError("Invalid local planner: {}".format(chosen_local_planner))
                 
-                if collect_opts.log_iou: # Toggle: Do real-time iou check
+                if log_iou: # Toggle: Do real-time iou check
                     _, _, _, _, lama_pred_alltrain_viz_t = \
                             get_lama_pred_from_obs(mapper.obs_map.copy(), lama_alltrain_model, lama_map_transform, device)
 
@@ -635,7 +695,7 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
 
                 # Visualize
                 start_time = time.time()
-                if show_plt: 
+                if save_experiment_artifacts and show_plt:
                     for a in ax.flatten():
                         a.clear()
 
@@ -855,6 +915,7 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                 pose_list = np.concatenate([pose_list, np.atleast_2d(cur_pose)], axis=0)
                 # # Observation: Get instant observation and accumulate
                 mapper.observe_and_accumulate_given_pose(cur_pose)
+                steps_completed += 1
                 # print("5. Accumulating obs took {} seconds".format(np.round(time.time() - start_time, 2)))
 
                 # Save current mission status 
@@ -878,35 +939,24 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                 update_mission_status(start_time=start_exp_time, cur_step=t, mission_complete=True, fail_reason="", mission_status_save_path=mission_status_save_path)
                 print("\033[94mMission complete for {}!\033[0m".format(exp_title))
 
-        if training_data_root is not None and mode == 'nearest':
-            split_dir = os.path.join(training_data_root, 'train_3')
-            global_gt_dir = os.path.join(split_dir, 'global_gt')
-            global_obs_dir = os.path.join(split_dir, 'global_obs')
-            os.makedirs(global_gt_dir, exist_ok=True)
-            os.makedirs(global_obs_dir, exist_ok=True)
-
-            gt_path = os.path.join(global_gt_dir, f'{sample_name}.png')
-            obs_path = os.path.join(global_obs_dir, f'{sample_name}.png')
-            gt_train_map = mapper.gt_map[pd_size:-pd_size, pd_size:-pd_size]
-            obs_train_map = mapper.obs_map[pd_size:-pd_size, pd_size:-pd_size]
-            gt_written = cv2.imwrite(
-                gt_path, smu.convert_01_single_channel_to_0_255_3_channel(gt_train_map)
-            )
-            obs_written = cv2.imwrite(
-                obs_path, smu.convert_01_single_channel_to_0_255_3_channel(obs_train_map)
-            )
-            if not gt_written or not obs_written:
-                raise IOError(f"Failed to save training pair {sample_name}")
-
-            interior_obs_map = mapper.obs_map[pd_size:-pd_size, pd_size:-pd_size]
-            known_fraction = np.mean(interior_obs_map != 0.5)
-            print(f"Saved training pair {sample_name}: {t} frontier steps, {known_fraction:.1%} known interior cells")
     except Exception as e:
         print("\033[93mMission failed with exception for {}!\033[0m".format(exp_title))
         print(e)
         # print the exception and line number 
         print(traceback.format_exc())
         update_mission_status(start_time=start_exp_time, cur_step=t, mission_complete=False, fail_reason=str(e), mission_status_save_path=mission_status_save_path)
+    finally:
+        try:
+            if collect_training_pair and initial_observation_ready:
+                # Also runs on empty frontiers, no path, and later exceptions.
+                save_lama_training_pair(mapper, training_data_root, sample_name,
+                                        steps_completed, padding=pd_size, phase='final')
+            elif collect_training_pair:
+                print('No training pair saved for {}: initial observation was not completed'.format(
+                    sample_name), flush=True)
+        finally:
+            if fig is not None:
+                plt.close(fig)
     
 def determine_use_model(mode):
     possible_mode_list = 'nearest', 'nbv-2d', 'onlyvar', 'visunk', 'visvar', 'mapex', 'upen', 'hectoraug', 'pipe', 'pw-nbv-2d'
