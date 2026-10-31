@@ -17,7 +17,7 @@ from collections import deque
 from queue import PriorityQueue
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 
-from lama_pred_utils import load_lama_model, visualize_prediction, get_lama_transform, convert_obsimg_to_model_input
+from lama_pred_utils import load_lama_model, visualize_prediction, get_lama_transform, convert_obsimg_to_model_input, load_satellite_prior_for_map
 from calc_metrics_subdirectory import calculate_iou_kth
 import sys
 sys.path.append('../')
@@ -57,9 +57,10 @@ def update_mission_status(start_time, cur_step, mission_complete, fail_reason, m
     with open(mission_status_save_path, 'w') as f:
         json.dump(mission_status, f)
 
-def get_lama_pred_from_obs(cur_obs_img, lama_model, lama_map_transform, device):
+def get_lama_pred_from_obs(cur_obs_img, lama_model, lama_map_transform, device, satellite_prior=None):
     cur_obs_img_3chan = np.stack([cur_obs_img, cur_obs_img, cur_obs_img], axis=2)
-    input_lama_batch, lama_mask = convert_obsimg_to_model_input(cur_obs_img_3chan, lama_map_transform, device)
+    input_lama_batch, lama_mask = convert_obsimg_to_model_input(cur_obs_img_3chan, lama_map_transform, device,
+        satellite=satellite_prior, use_satellite=True)
     lama_pred_alltrain = lama_model(input_lama_batch)
     lama_pred_alltrain_viz = visualize_prediction(lama_pred_alltrain, lama_mask)
     return cur_obs_img_3chan, input_lama_batch, lama_mask, lama_pred_alltrain, lama_pred_alltrain_viz
@@ -252,6 +253,12 @@ def run_exploration_comparison_for_map(args):
     assert os.path.exists(map_valid_space_npy_path), "Valid space map path does not exist: {}".format(map_valid_space_npy_path)
     occ_map, validspace_map = sim_utils.get_kth_occ_validspace_map(map_occ_npy_path, map_valid_space_npy_path)
     map_name = os.path.dirname(map_occ_npy_path)
+    satellite_prior = load_satellite_prior_for_map(
+        map_folder_path, occ_map.shape, satellite_dir=args.get('satellite_dir'))
+    if satellite_prior is None and any(getattr(model, 'condition_on_satellite', False)
+                                       for model in [lama_model] + list(models_list)):
+        print('No satellite footprint for {}: using neutral 0.5 prior'.format(
+            os.path.basename(map_folder_path)), flush=True)
 
     # Sample random start pose, if start_pose is None
     if start_pose is None:
@@ -276,12 +283,12 @@ def run_exploration_comparison_for_map(args):
             use_distance_transform_for_planning=use_distance_transform_for_planning, upen_config=upen_config,
                 max_steps=max_steps, target_known_fraction=target_known_fraction,
                 training_data_root=training_data_root, sample_name=sample_name,
-                save_experiment_artifacts=save_experiment_artifacts)
+                save_experiment_artifacts=save_experiment_artifacts, satellite_prior=satellite_prior)
 
 def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model, lama_map_transform, pred_vis_configs, lidar_sim_configs, mode, \
     start_pose, unknown_as_occ, use_distance_transform_for_planning, upen_config=None, max_steps=None,
             target_known_fraction=None, training_data_root=None, sample_name=None,
-            save_experiment_artifacts=True):
+            save_experiment_artifacts=True, satellite_prior=None):
     t = 0
     steps_completed = 0
     mapper = None
@@ -455,7 +462,7 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                         if mode == 'hectoraug':
                             hector_cur_obs_img = mapper.obs_map.copy()
                             cur_obs_img_3chan, input_lama_batch, lama_mask, lama_pred_alltrain, lama_pred_alltrain_viz = \
-                                get_lama_pred_from_obs(hector_cur_obs_img, lama_alltrain_model, lama_map_transform, device)
+                                get_lama_pred_from_obs(hector_cur_obs_img, lama_alltrain_model, lama_map_transform, device, satellite_prior=satellite_prior)
                             pred_maputils = get_pred_maputils_from_viz(lama_pred_alltrain_viz)
                             hector_frontier_region_centers_unscored = frontier_region_centers_unscored
                             padded_obs_map = get_padded_obs_map(mapper.obs_map)
@@ -502,7 +509,7 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                             cur_obs_img = mapper.obs_map.copy()
                             # LAMA global prediction (trained with all training set)
                             cur_obs_img_3chan, input_lama_batch, lama_mask, lama_pred_alltrain, lama_pred_alltrain_viz = \
-                                get_lama_pred_from_obs(cur_obs_img, lama_alltrain_model, lama_map_transform, device)
+                                get_lama_pred_from_obs(cur_obs_img, lama_alltrain_model, lama_map_transform, device, satellite_prior=satellite_prior)
                             # Get ensemble prediction trained on subsets
                             lama_pred_list = []
                             #lama_reduced_pred_list = []
@@ -663,7 +670,7 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                 
                 if log_iou: # Toggle: Do real-time iou check
                     _, _, _, _, lama_pred_alltrain_viz_t = \
-                            get_lama_pred_from_obs(mapper.obs_map.copy(), lama_alltrain_model, lama_map_transform, device)
+                            get_lama_pred_from_obs(mapper.obs_map.copy(), lama_alltrain_model, lama_map_transform, device, satellite_prior=satellite_prior)
 
                     iou = calculate_iou_kth(lama_pred_alltrain_viz_t[500:-500, 500:-500, :], 
                                             padded_gt_map[500:-500, 500:-500], 
@@ -981,6 +988,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--collect_world_list', nargs='+', help='List of worlds to collect data from')
     parser.add_argument('--map_dir', help='Directory containing map subdirectories with occ_map.npy and valid_space.npy')
+    parser.add_argument('--satellite_dir', help='Optional aligned footprint PNGs named <map-folder-name>.png; otherwise looks for satellite.png within each map folder')
     parser.add_argument('--start_pose', nargs='+', help='List of start pose')
     parser.add_argument('--num_data_per_world', type=int, help='Number of independent runs for each selected map')
     parser.add_argument('--max_steps', type=int, help='Maximum frontier steps per run')
@@ -1061,6 +1069,7 @@ if __name__ == '__main__':
     for sample_index, kth_map_folder_path in enumerate(kth_map_folder_paths):
         args_dict = {
             'map_folder_path': kth_map_folder_path,
+            'satellite_dir': args.satellite_dir,
             'models_list': model_list,
             'lama_model': lama_model,
             'lama_map_transform': lama_map_transform,

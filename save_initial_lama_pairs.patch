@@ -1,0 +1,597 @@
+--- a/scripts/explore.py
++++ b/scripts/explore.py
+@@ -100,28 +100,60 @@
+     
+     # First check if we have any frontiers left
+     if len(frontier_region_centers) == 0:
+-        mission_failed = True
+         update_mission_status(start_time=start_exp_time, cur_step=t, mission_complete=False, fail_reason="frontier_region_centers", mission_status_save_path=mission_status_save_path)
+-        return frontier_selected, None, None, None
++        return frontier_selected, None, frontier_region_centers, total_cost
+     
+     # Find the minimum cost index
+     min_cost_idx = np.argmin(total_cost)
+     
+     # Store the minimum cost frontier before deletion
+-    locked_frontier_center = frontier_region_centers[min_cost_idx]
++    locked_frontier_center = np.array(frontier_region_centers[min_cost_idx], copy=True)
+     
+     # Remove the selected frontier and its cost
+     frontier_region_centers = np.delete(frontier_region_centers, min_cost_idx, axis=0)
+     total_cost = np.delete(total_cost, min_cost_idx, axis=0)
+     
+-    # Check if we have any frontiers left after deletion
+-    if len(frontier_region_centers) == 0:
+-        mission_failed = True
+-        update_mission_status(start_time=start_exp_time, cur_step=t, mission_complete=False, fail_reason="frontier_region_centers", mission_status_save_path=mission_status_save_path)
+-        return frontier_selected, None, None, None
+-    
++    # The selected frontier remains usable even if no alternatives remain.
+     frontier_selected = True
+     return frontier_selected, locked_frontier_center, frontier_region_centers, total_cost
++
++
++def save_lama_training_pair(mapper, training_data_root, sample_name, steps_completed,
++                            padding=500, phase='final'):
++    """Save the latest observation, preserving a previous pair if encoding fails."""
++    if not sample_name:
++        raise ValueError('A sample_name is required for LaMa training pairs')
++    gt_train_map = mapper.gt_map[padding:-padding, padding:-padding] if padding else mapper.gt_map
++    obs_train_map = mapper.obs_map[padding:-padding, padding:-padding] if padding else mapper.obs_map
++    if gt_train_map.size == 0 or gt_train_map.shape != obs_train_map.shape:
++        raise ValueError('Expected matching nonempty GT and observation interiors')
++    split_dir = os.path.join(training_data_root, 'train_3')
++    gt_dir = os.path.join(split_dir, 'global_gt')
++    obs_dir = os.path.join(split_dir, 'global_obs')
++    os.makedirs(gt_dir, exist_ok=True)
++    os.makedirs(obs_dir, exist_ok=True)
++    gt_path = os.path.join(gt_dir, '{}.png'.format(sample_name))
++    obs_path = os.path.join(obs_dir, '{}.png'.format(sample_name))
++    gt_temp = os.path.join(gt_dir, '.{}.tmp.png'.format(sample_name))
++    obs_temp = os.path.join(obs_dir, '.{}.tmp.png'.format(sample_name))
++    try:
++        gt_image = np.rint(smu.convert_01_single_channel_to_0_255_3_channel(gt_train_map)).astype(np.uint8)
++        obs_image = np.rint(smu.convert_01_single_channel_to_0_255_3_channel(obs_train_map)).astype(np.uint8)
++        if not cv2.imwrite(gt_temp, gt_image):
++            raise IOError('Failed to encode training GT {}'.format(sample_name))
++        if not cv2.imwrite(obs_temp, obs_image):
++            raise IOError('Failed to encode training observation {}'.format(sample_name))
++        # GT is constant throughout a run. Replace only after both encodes work.
++        os.replace(gt_temp, gt_path)
++        os.replace(obs_temp, obs_path)
++    finally:
++        for path in (gt_temp, obs_temp):
++            if os.path.exists(path):
++                os.remove(path)
++    known_fraction = float(np.mean(obs_train_map != 0.5))
++    print('Saved {} training pair {}: {} frontier steps, {:.1%} known interior cells'.format(
++        phase, sample_name, steps_completed, known_fraction), flush=True)
++
+ 
+ def determine_local_planner(mode):
+     if mode == 'upen':
+@@ -250,7 +282,15 @@
+     start_pose, unknown_as_occ, use_distance_transform_for_planning, upen_config=None, max_steps=None,
+             target_known_fraction=None, training_data_root=None, sample_name=None,
+             save_experiment_artifacts=True):
+-    try: 
++    t = 0
++    steps_completed = 0
++    mapper = None
++    initial_observation_ready = False
++    mission_status_save_path = None
++    fig = None
++    pd_size = 500 #padding_size; padded pixels for raycast at the boundary of map
++    collect_training_pair = training_data_root is not None and mode == 'nearest'
++    try:
+         print("exp_title:", exp_title)
+         start_exp_time = time.time()
+         pixel_per_meter = lidar_sim_configs['pixel_per_meter']
+@@ -280,12 +320,13 @@
+         if mode in ['pipe', 'mapex']:
+             plt_row = 2
+             plt_col = 2
+-            fig, ax = plt.subplots(plt_row, plt_col, figsize=(20, 10))
+-            ax_flatten = ax.flatten()
+-            ax_gt = ax_flatten[0]
+-            ax_obs = ax_flatten[1]
+-            ax_pred_var = ax_flatten[2]
+-            ax_mean_map = ax_flatten[3]
++            if save_experiment_artifacts:
++                fig, ax = plt.subplots(plt_row, plt_col, figsize=(20, 10))
++                ax_flatten = ax.flatten()
++                ax_gt = ax_flatten[0]
++                ax_obs = ax_flatten[1]
++                ax_pred_var = ax_flatten[2]
++                ax_mean_map = ax_flatten[3]
+             pred_maputils = None
+             var_map = None
+             mean_map = None
+@@ -294,10 +335,11 @@
+         elif mode in ['nearest', 'nbv-2d', 'pw-nbv-2d']:
+             plt_row = 2
+             plt_col = 1
+-            fig, ax = plt.subplots(plt_row, plt_col, figsize=(15, 10))
+-            ax_flatten = ax.flatten()
+-            ax_gt = ax_flatten[0]
+-            ax_obs = ax_flatten[1]
++            if save_experiment_artifacts:
++                fig, ax = plt.subplots(plt_row, plt_col, figsize=(15, 10))
++                ax_flatten = ax.flatten()
++                ax_gt = ax_flatten[0]
++                ax_obs = ax_flatten[1]
+             pred_maputils = None
+             var_map = None
+             mean_map = None
+@@ -314,10 +356,14 @@
+         #initial observation
+         cur_pose = start_pose
+         mapper.observe_and_accumulate_given_pose(cur_pose)
++        initial_observation_ready = True
++        if collect_training_pair:
++            # Keep a usable pair on disk before frontier detection or planning.
++            save_lama_training_pair(mapper, training_data_root, sample_name,
++                                    steps_completed, padding=pd_size, phase='initial')
+         ind_to_move_per_step = 3
+         pose_list = np.atleast_2d(cur_pose) # Assumes last pose is the current pose
+ 
+-        pd_size = 500 #padding_size; padded pixels for raycast at the boundary of map
+         #there is a small offset between observed map size and lama prediction output size
+         gt_h, gt_w = mapper.gt_map.shape[0],mapper.gt_map.shape[1]
+         pad_h = gt_h%16
+@@ -445,7 +491,7 @@
+                         need_new_locked_frontier = not is_locked_frontier_center_valid(locked_frontier_center, occ_grid_pyastar, cur_pose, collect_opts, pixel_per_meter)
+                                     
+                     if need_new_locked_frontier:
+-                        show_plt = True
++                        show_plt = save_experiment_artifacts
+                                                         
+                         # Predict map -----
+                         pred_maputils = None
+@@ -516,6 +562,10 @@
+                         else:
+                             #frontier-based methods: recalculate all frontier center scores
+                             frontier_region_centers_unscored, filtered_map, num_large_regions = frontier_planner.get_frontier_centers_given_obs_map(mapper.obs_map)
++                            if len(frontier_region_centers_unscored) == 0:
++                                mission_failed = True
++                                update_mission_status(start_time=start_exp_time, cur_step=t, mission_complete=False, fail_reason="frontier_region_no_large_region", mission_status_save_path=mission_status_save_path)
++                                break
+                             
+ 
+                             if mode in ['pipe', 'pw-nbv-2d']: # Do pathwise method
+@@ -574,10 +624,18 @@
+                             raise ValueError("Invalid mode: {}, mode not available for getting init_frontier_value".format(mode))
+                         cost_transform_map = get_hector_exploration_transform_map(mapper.obs_map, frontier_region_centers, init_cost=danger_transform_map, mode=mode, infogain_val_list=init_frontier_value, info_gain_weight=200)
+ 
++                # A break in frontier reselection exits only its inner loop.
++                if mission_failed:
++                    break
++
+                 # Local planning
+                 chosen_local_planner = determine_local_planner(mode) # astar or gradient
+                 
+                 if chosen_local_planner == 'astar':
++                    if locked_frontier_center is None:
++                        mission_failed = True
++                        update_mission_status(start_time=start_exp_time, cur_step=t, mission_complete=False, fail_reason="frontier_region_centers", mission_status_save_path=mission_status_save_path)
++                        break
+                     path = pyastar2d.astar_path(occ_grid_pyastar, cur_pose, locked_frontier_center, allow_diagonal=False)
+                     while path is None:
+                         frontier_selected, locked_frontier_center, frontier_region_centers, frontier_cost_list = reselect_frontier_from_frontier_region_centers(frontier_region_centers, frontier_cost_list, t, start_exp_time, mission_status_save_path)
+@@ -585,6 +643,8 @@
+                             mission_failed = True
+                             update_mission_status(start_time=start_exp_time, cur_step=t, mission_complete=False, fail_reason="frontier_region_centers", mission_status_save_path=mission_status_save_path)
+                             break
++                        if not is_locked_frontier_center_valid(locked_frontier_center, occ_grid_pyastar, cur_pose, collect_opts, pixel_per_meter):
++                            continue
+                         path = pyastar2d.astar_path(occ_grid_pyastar, cur_pose, locked_frontier_center, allow_diagonal=False)
+                     if mission_failed:
+                         break
+@@ -601,7 +661,7 @@
+                 else:
+                     raise ValueError("Invalid local planner: {}".format(chosen_local_planner))
+                 
+-                if collect_opts.log_iou: # Toggle: Do real-time iou check
++                if log_iou: # Toggle: Do real-time iou check
+                     _, _, _, _, lama_pred_alltrain_viz_t = \
+                             get_lama_pred_from_obs(mapper.obs_map.copy(), lama_alltrain_model, lama_map_transform, device)
+ 
+@@ -635,7 +695,7 @@
+ 
+                 # Visualize
+                 start_time = time.time()
+-                if show_plt: 
++                if save_experiment_artifacts and show_plt:
+                     for a in ax.flatten():
+                         a.clear()
+ 
+@@ -855,6 +915,7 @@
+                 pose_list = np.concatenate([pose_list, np.atleast_2d(cur_pose)], axis=0)
+                 # # Observation: Get instant observation and accumulate
+                 mapper.observe_and_accumulate_given_pose(cur_pose)
++                steps_completed += 1
+                 # print("5. Accumulating obs took {} seconds".format(np.round(time.time() - start_time, 2)))
+ 
+                 # Save current mission status 
+@@ -878,35 +939,24 @@
+                 update_mission_status(start_time=start_exp_time, cur_step=t, mission_complete=True, fail_reason="", mission_status_save_path=mission_status_save_path)
+                 print("\033[94mMission complete for {}!\033[0m".format(exp_title))
+ 
+-        if training_data_root is not None and mode == 'nearest':
+-            split_dir = os.path.join(training_data_root, 'train_3')
+-            global_gt_dir = os.path.join(split_dir, 'global_gt')
+-            global_obs_dir = os.path.join(split_dir, 'global_obs')
+-            os.makedirs(global_gt_dir, exist_ok=True)
+-            os.makedirs(global_obs_dir, exist_ok=True)
+-
+-            gt_path = os.path.join(global_gt_dir, f'{sample_name}.png')
+-            obs_path = os.path.join(global_obs_dir, f'{sample_name}.png')
+-            gt_train_map = mapper.gt_map[pd_size:-pd_size, pd_size:-pd_size]
+-            obs_train_map = mapper.obs_map[pd_size:-pd_size, pd_size:-pd_size]
+-            gt_written = cv2.imwrite(
+-                gt_path, smu.convert_01_single_channel_to_0_255_3_channel(gt_train_map)
+-            )
+-            obs_written = cv2.imwrite(
+-                obs_path, smu.convert_01_single_channel_to_0_255_3_channel(obs_train_map)
+-            )
+-            if not gt_written or not obs_written:
+-                raise IOError(f"Failed to save training pair {sample_name}")
+-
+-            interior_obs_map = mapper.obs_map[pd_size:-pd_size, pd_size:-pd_size]
+-            known_fraction = np.mean(interior_obs_map != 0.5)
+-            print(f"Saved training pair {sample_name}: {t} frontier steps, {known_fraction:.1%} known interior cells")
+     except Exception as e:
+         print("\033[93mMission failed with exception for {}!\033[0m".format(exp_title))
+         print(e)
+         # print the exception and line number 
+         print(traceback.format_exc())
+         update_mission_status(start_time=start_exp_time, cur_step=t, mission_complete=False, fail_reason=str(e), mission_status_save_path=mission_status_save_path)
++    finally:
++        try:
++            if collect_training_pair and initial_observation_ready:
++                # Also runs on empty frontiers, no path, and later exceptions.
++                save_lama_training_pair(mapper, training_data_root, sample_name,
++                                        steps_completed, padding=pd_size, phase='final')
++            elif collect_training_pair:
++                print('No training pair saved for {}: initial observation was not completed'.format(
++                    sample_name), flush=True)
++        finally:
++            if fig is not None:
++                plt.close(fig)
+     
+ def determine_use_model(mode):
+     possible_mode_list = 'nearest', 'nbv-2d', 'onlyvar', 'visunk', 'visvar', 'mapex', 'upen', 'hectoraug', 'pipe', 'pw-nbv-2d'
+--- a/collect_lama_pairs.sbatch
++++ b/collect_lama_pairs.sbatch
+@@ -131,8 +131,11 @@
+ cd "$REPO_ROOT/scripts"
+ python -u - "$MAPS_DIR" "$DATA_ROOT" "$MAX_STEPS" "$TARGET_KNOWN_FRACTION" <<'PY'
+ import matplotlib
++import os
+ import runpy
+ import sys
++
++import cv2
+ 
+ matplotlib.use("Agg")
+ matplotlib.use = lambda *args, **kwargs: None
+@@ -145,22 +148,25 @@
+     "--training_data_root", data_root,
+     "--no_experiment_artifacts",
+ ]
+-runpy.run_path("explore.py", run_name="__main__")
++collection = runpy.run_path("explore.py", run_name="__main__")
++
++# Validate exactly this invocation's samples, even when DATA_ROOT has older pairs.
++expected_samples = [item['sample_name'] for item in collection['run_exploration_args']]
++failures = []
++for sample_name in expected_samples:
++    gt_path = os.path.join(data_root, 'train_3', 'global_gt', sample_name + '.png')
++    obs_path = os.path.join(data_root, 'train_3', 'global_obs', sample_name + '.png')
++    gt = cv2.imread(gt_path) if os.path.isfile(gt_path) else None
++    obs = cv2.imread(obs_path) if os.path.isfile(obs_path) else None
++    if gt is None or obs is None:
++        failures.append(sample_name + ': missing or unreadable GT/observation')
++    elif gt.shape != obs.shape:
++        failures.append(sample_name + ': GT/observation dimensions differ')
++if failures:
++    raise SystemExit('ERROR: Incomplete collection:\n' + '\n'.join(failures))
++print('Validated {} pairs from collection {}'.format(
++    len(expected_samples), collection['collection_id']))
+ PY
+-
+-shopt -s nullglob
+-GT_PAIRS=("$DATA_ROOT"/train_3/global_gt/*.png)
+-OBS_PAIRS=("$DATA_ROOT"/train_3/global_obs/*.png)
+-if [[ ${#GT_PAIRS[@]} -ne "$MAP_COUNT" || ${#OBS_PAIRS[@]} -ne "$MAP_COUNT" ]]; then
+-    echo "ERROR: Expected $MAP_COUNT pairs, found ${#GT_PAIRS[@]} GT and ${#OBS_PAIRS[@]} observed maps."
+-    exit 1
+-fi
+-for index in "${!GT_PAIRS[@]}"; do
+-    if [[ "$(basename "${GT_PAIRS[$index]}")" != "$(basename "${OBS_PAIRS[$index]}")" ]]; then
+-        echo "ERROR: GT/observed filenames do not pair: ${GT_PAIRS[$index]} and ${OBS_PAIRS[$index]}"
+-        exit 1
+-    fi
+-done
+ 
+ echo "LaMa pair collection finished. Data: $DATA_ROOT/train_3"
+ echo "Expected pairs: $MAP_COUNT"
+--- /dev/null
++++ b/tests/test_collect_lama_pairs.py
+@@ -0,0 +1,276 @@
++"""Regression tests for collection exits, without GPU or simulator dependencies.
++
++Run from the repository root: python -m unittest discover -s tests -v
++Needs NumPy and Pillow. Production functions are compiled from explore.py's AST
++so their control flow is exercised with deterministic mapper/planner stand-ins.
++Image writes/readback use Pillow in place of OpenCV's PNG codec.
++"""
++import ast
++from contextlib import contextmanager, redirect_stdout
++from datetime import datetime
++import io
++import json
++import os
++from pathlib import Path
++import sys
++import tempfile
++import time
++import traceback
++from types import SimpleNamespace
++import unittest
++from unittest import mock
++
++import numpy as np
++from PIL import Image
++
++
++ROOT = Path(__file__).resolve().parents[1]
++SOURCE = ROOT / 'scripts' / 'explore.py'
++FUNCTIONS = {
++    'dummy_context_manager', 'update_mission_status',
++    'is_locked_frontier_center_valid', 'reselect_frontier_from_frontier_region_centers',
++    'save_lama_training_pair', 'determine_local_planner',
++    'run_exploration_for_map', 'determine_use_model',
++}
++
++
++def write_png(path, array):
++    Image.fromarray(np.rint(array).astype(np.uint8)).save(str(path))
++    return True
++
++
++def read_png(path):
++    try:
++        with Image.open(path) as image:
++            return np.array(image.convert('RGB'))
++    except (OSError, ValueError):
++        return None
++
++
++def load_functions(namespace):
++    tree = ast.parse(SOURCE.read_text(encoding='utf-8'))
++    tree.body = [node for node in tree.body
++                 if isinstance(node, ast.FunctionDef) and node.name in FUNCTIONS]
++    exec(compile(tree, str(SOURCE), 'exec'), namespace)
++
++
++class CollectionExitTests(unittest.TestCase):
++    def setUp(self):
++        self.temp = tempfile.TemporaryDirectory()
++        self.addCleanup(self.temp.cleanup)
++        self.data_root = self.temp.name
++        self.gt = np.zeros((1008, 1009), dtype=float)
++        self.gt[500, 500] = 1
++        self.start = np.array([503, 503])
++        self.frontiers = np.array([[505, 505]])
++        self.path_available = True
++        self.frontier_exception_after_moves = None
++        self.frontier_calls = 0
++        self.empty_on_refresh = False
++        self.initial_observation_fails = False
++        self.astar_goals = []
++        self.mapper = None
++        test = self
++
++        class Mapper:
++            def __init__(self, gt_map, *args, **kwargs):
++                self.gt_map = gt_map.copy()
++                self.obs_map = np.full_like(gt_map, 0.5)
++                self.observations = 0
++                test.mapper = self
++
++            def observe_and_accumulate_given_pose(self, pose):
++                if test.initial_observation_fails and self.observations == 0:
++                    raise RuntimeError('initial lidar failed')
++                self.obs_map[tuple(pose)] = self.gt_map[tuple(pose)]
++                self.observations += 1
++
++            def get_inflated_planning_maps(self, **kwargs):
++                return np.ones_like(self.gt_map, dtype=np.float32)
++
++        class Planner:
++            def __init__(self, **kwargs):
++                pass
++
++            def get_frontier_centers_given_obs_map(self, obs):
++                test.frontier_calls += 1
++                # The initial checkpoint must already exist before planning.
++                test.assertTrue(test.pair_path('global_obs').is_file())
++                if (test.frontier_exception_after_moves is not None and
++                        test.mapper.observations - 1 >= test.frontier_exception_after_moves):
++                    raise RuntimeError('simulated frontier detection failure')
++                candidates = test.frontiers
++                if test.empty_on_refresh and test.frontier_calls > 1:
++                    candidates = np.empty((0, 2), dtype=int)
++                return candidates, None, len(candidates)
++
++            def score_frontiers(self, candidates, *args, **kwargs):
++                return np.asarray(candidates), np.arange(len(candidates)), None, None, 0, 0
++
++        def astar(weights, start, goal, **kwargs):
++            test.assertIsNotNone(goal, 'A* must never receive an empty frontier goal')
++            test.astar_goals.append(np.array(goal))
++            if not test.path_available:
++                return None
++            return np.array([start, goal])
++
++        self.pyplot = SimpleNamespace(subplots=mock.Mock(side_effect=AssertionError('plotting is disabled')),
++                                      close=mock.Mock())
++        self.namespace = dict(np=np, os=os, time=time, json=json, traceback=traceback,
++            datetime=datetime, contextmanager=contextmanager, plt=self.pyplot,
++            cv2=SimpleNamespace(imwrite=write_png),
++            smu=SimpleNamespace(convert_01_single_channel_to_0_255_3_channel=lambda a: np.repeat(a[:, :, None], 3, axis=2) * 255),
++            sim_utils=SimpleNamespace(Mapper=Mapper, FrontierPlanner=Planner,
++                psuedo_traj_controller=lambda x, y, **kw: np.array([x[-1], y[-1]])),
++            pyastar2d=SimpleNamespace(astar_path=astar),
++            collect_opts=SimpleNamespace(log_iou=False, cur_pose_dist_threshold_m=1,
++                show_plt_freq=50, mission_time=200),
++            get_padded_obs_map=lambda a: a, get_padded_gt_map=lambda a: a)
++        load_functions(self.namespace)
++
++    def pair_path(self, folder):
++        return Path(self.data_root) / 'train_3' / folder / 'sample.png'
++
++    def run_collection(self, max_steps=1, target_known_fraction=None):
++        self.output = io.StringIO()
++        with redirect_stdout(self.output):
++            self.namespace['run_exploration_for_map'](
++                self.gt, '20261026_120000_test_503_503', [], None, None, {},
++                {'pixel_per_meter': 1}, 'nearest', self.start, True, True,
++                max_steps=max_steps, target_known_fraction=target_known_fraction,
++                training_data_root=self.data_root, sample_name='sample',
++                save_experiment_artifacts=False)
++
++    def assert_pair(self, observed_cells):
++        gt = read_png(self.pair_path('global_gt'))
++        obs = read_png(self.pair_path('global_obs'))
++        self.assertIsNotNone(gt)
++        self.assertIsNotNone(obs)
++        self.assertEqual(gt.shape, (8, 9, 3))
++        self.assertEqual(obs.shape, gt.shape)
++        self.assertEqual(np.count_nonzero(obs[:, :, 0] != 128), observed_cells)
++        self.assertFalse(list(Path(self.data_root).rglob('*.tmp.png')))
++        self.pyplot.subplots.assert_not_called()
++
++    def test_no_initial_frontiers_still_saves_initial_pair(self):
++        self.frontiers = np.empty((0, 2), dtype=int)
++        self.run_collection()
++        self.assert_pair(1)
++        self.assertEqual(self.astar_goals, [])
++        self.assertIn('0 frontier steps', self.output.getvalue())
++        self.assertNotIn('exception', self.output.getvalue())
++
++    def test_all_candidates_invalid_never_calls_astar_with_none(self):
++        self.frontiers = np.array([self.start])
++        self.run_collection()
++        self.assert_pair(1)
++        self.assertEqual(self.astar_goals, [])
++        self.assertNotIn('exception', self.output.getvalue())
++
++    def test_last_remaining_valid_candidate_is_used(self):
++        self.frontiers = np.array([self.start, [505, 505]])
++        self.run_collection()
++        self.assert_pair(2)
++        np.testing.assert_array_equal(self.astar_goals[-1], [505, 505])
++        self.assertIn('1 frontier steps', self.output.getvalue())
++
++    def test_unreachable_candidates_still_save_initial_pair(self):
++        self.path_available = False
++        self.run_collection()
++        self.assert_pair(1)
++        self.assertTrue(self.astar_goals)
++        self.assertNotIn('exception', self.output.getvalue())
++
++    def test_no_frontiers_after_refresh_stops_cleanly(self):
++        self.empty_on_refresh = True
++        self.run_collection()
++        self.assert_pair(1)
++        self.assertEqual(self.astar_goals, [])
++        self.assertNotIn('exception', self.output.getvalue())
++
++    def test_exception_after_initial_observation_still_saves_pair(self):
++        self.frontier_exception_after_moves = 0
++        self.run_collection()
++        self.assert_pair(1)
++        self.assertIn('simulated frontier detection failure', self.output.getvalue())
++
++    def test_exception_after_moving_saves_latest_observation(self):
++        self.frontier_exception_after_moves = 1
++        self.run_collection(max_steps=3)
++        self.assert_pair(2)
++        self.assertIn('simulated frontier detection failure', self.output.getvalue())
++        self.assertIn('Saved final training pair sample: 1 frontier steps', self.output.getvalue())
++
++    def test_target_fraction_stop_saves_latest_pair(self):
++        self.run_collection(max_steps=3, target_known_fraction=0.02)
++        self.assert_pair(2)
++        self.assertIn('Reached', self.output.getvalue())
++
++    def test_iou_disabled_with_experiment_artifacts(self):
++        self.namespace['collect_opts'].log_iou = True
++        self.run_collection()
++        self.assert_pair(2)
++        self.assertNotIn('exception', self.output.getvalue())
++
++    def test_no_initial_observation_does_not_fabricate_pair(self):
++        self.initial_observation_fails = True
++        self.run_collection()
++        self.assertFalse(self.pair_path('global_gt').exists())
++        self.assertFalse(self.pair_path('global_obs').exists())
++        self.assertIn('initial observation was not completed', self.output.getvalue())
++
++    def test_failed_final_encode_preserves_initial_pair(self):
++        self.frontiers = np.empty((0, 2), dtype=int)
++        self.run_collection()
++        old_gt = self.pair_path('global_gt').read_bytes()
++        old_obs = self.pair_path('global_obs').read_bytes()
++        self.mapper.obs_map[504, 504] = 0
++        def failed_obs_writer(path, array):
++            return False if 'global_obs' in path else write_png(path, array)
++        self.namespace['cv2'].imwrite = failed_obs_writer
++        with self.assertRaises(IOError):
++            self.namespace['save_lama_training_pair'](self.mapper, self.data_root, 'sample', 1)
++        self.assertEqual(old_gt, self.pair_path('global_gt').read_bytes())
++        self.assertEqual(old_obs, self.pair_path('global_obs').read_bytes())
++        self.assertFalse(list(Path(self.data_root).rglob('*.tmp.png')))
++
++
++class BatchValidationTests(unittest.TestCase):
++    def run_validation(self, extra_old=True, missing_current=False, mismatched=False):
++        with tempfile.TemporaryDirectory() as temp:
++            for folder in ('global_gt', 'global_obs'):
++                directory = Path(temp) / 'train_3' / folder
++                directory.mkdir(parents=True)
++                if extra_old:
++                    write_png(directory / 'old.png', np.zeros((4, 4, 3)))
++                if not (missing_current and folder == 'global_obs'):
++                    shape = (3, 4, 3) if mismatched and folder == 'global_obs' else (4, 4, 3)
++                    write_png(directory / 'current.png', np.zeros(shape))
++            script = (ROOT / 'collect_lama_pairs.sbatch').read_text(encoding='utf-8')
++            invocation = script.split('python -u - "$MAPS_DIR"', 1)[1]
++            code = invocation.split("<<'PY'\n", 1)[1].split('\nPY', 1)[0]
++            collection = {'run_exploration_args': [{'sample_name': 'current'}], 'collection_id': 'current-run'}
++            modules = {'cv2': SimpleNamespace(imread=read_png),
++                       'matplotlib': SimpleNamespace(use=mock.Mock()),
++                       'runpy': SimpleNamespace(run_path=mock.Mock(return_value=collection))}
++            output = io.StringIO()
++            with mock.patch.dict(sys.modules, modules), mock.patch.object(sys, 'argv', ['-', 'maps', temp, '200', '0.25']), redirect_stdout(output):
++                exec(compile(code, 'collect_lama_pairs.sbatch', 'exec'), {})
++            return output.getvalue()
++
++    def test_older_pairs_do_not_break_current_run_count(self):
++        self.assertIn('Validated 1 pairs from collection current-run', self.run_validation())
++
++    def test_old_pairs_do_not_hide_missing_current_observation(self):
++        with self.assertRaises(SystemExit) as raised:
++            self.run_validation(missing_current=True)
++        self.assertIn('current: missing or unreadable', str(raised.exception))
++
++    def test_dimension_mismatch_is_reported(self):
++        with self.assertRaises(SystemExit) as raised:
++            self.run_validation(mismatched=True)
++        self.assertIn('dimensions differ', str(raised.exception))
++
++
++if __name__ == '__main__':
++    unittest.main()

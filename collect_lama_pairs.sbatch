@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 #SBATCH --gres=gpu:1
-#SBATCH --qos=test
+#SBATCH --qos=eng
 #SBATCH --output=logs/lama-pairs-%j.out
 #SBATCH --error=logs/lama-pairs-%j.err
 #SBATCH --mail-user=ipa28@byu.edu

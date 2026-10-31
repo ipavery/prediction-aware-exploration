@@ -20,6 +20,8 @@ def make_constant_area_crop_batch(batch, **kwargs):
                                                                              **kwargs)
     batch['image'] = batch['image'][:, :, crop_y : crop_y + crop_height, crop_x : crop_x + crop_width]
     batch['mask'] = batch['mask'][:, :, crop_y: crop_y + crop_height, crop_x: crop_x + crop_width]
+    if 'satellite' in batch:
+        batch['satellite'] = batch['satellite'][:, :, crop_y: crop_y + crop_height, crop_x: crop_x + crop_width]
     return batch
 
 
@@ -28,9 +30,16 @@ class DefaultInpaintingTrainingModule(BaseInpaintingTrainingModule):
                  add_noise_kwargs=None, noise_fill_hole=False, const_area_crop_kwargs=None,
                  distance_weighter_kwargs=None, distance_weighted_mask_for_discr=False,
                  fake_fakes_proba=0, fake_fakes_generator_kwargs=None,
+                 condition_on_satellite=False, satellite_dropout=0.0,
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.concat_mask = concat_mask
+        self.condition_on_satellite = condition_on_satellite
+        self.satellite_dropout = float(satellite_dropout)
+        if not 0 <= self.satellite_dropout <= 1:
+            raise ValueError('satellite_dropout must be between 0 and 1')
+        if self.condition_on_satellite and (not concat_mask or int(self.config.generator.input_nc) != 5):
+            raise ValueError('Satellite conditioning requires concat_mask=true and generator.input_nc=5')
         self.rescale_size_getter = get_ramp(**rescale_scheduler_kwargs) if rescale_scheduler_kwargs is not None else None
         self.image_to_discriminator = image_to_discriminator
         self.add_noise_kwargs = add_noise_kwargs
@@ -49,6 +58,8 @@ class DefaultInpaintingTrainingModule(BaseInpaintingTrainingModule):
             cur_size = self.rescale_size_getter(self.global_step)
             batch['image'] = F.interpolate(batch['image'], size=cur_size, mode='bilinear', align_corners=False)
             batch['mask'] = F.interpolate(batch['mask'], size=cur_size, mode='nearest')
+            if 'satellite' in batch:
+                batch['satellite'] = F.interpolate(batch['satellite'], size=cur_size, mode='nearest')
 
         if self.training and self.const_area_crop_kwargs is not None:
             batch = make_constant_area_crop_batch(batch, **self.const_area_crop_kwargs)
@@ -66,6 +77,19 @@ class DefaultInpaintingTrainingModule(BaseInpaintingTrainingModule):
 
         if self.concat_mask:
             masked_img = torch.cat([masked_img, mask], dim=1)
+
+        if self.condition_on_satellite:
+            if 'satellite' not in batch:
+                raise ValueError('Satellite-conditioned LaMa requires batch["satellite"]')
+            satellite = batch['satellite'].to(device=img.device, dtype=img.dtype)
+            expected = (img.shape[0], 1, img.shape[2], img.shape[3])
+            if tuple(satellite.shape) != expected:
+                raise ValueError('Expected satellite shape {}, got {}'.format(expected, tuple(satellite.shape)))
+            if self.training and self.satellite_dropout:
+                drop = (torch.rand(img.shape[0], 1, 1, 1, device=img.device) < self.satellite_dropout).to(img.dtype)
+                satellite = satellite * (1 - drop) + 0.5 * drop
+            # Keep prior information in unknown cells; only RGB is masked.
+            masked_img = torch.cat([masked_img, satellite], dim=1)
 
         batch['predicted_image'] = self.generator(masked_img)
         batch['inpainted'] = mask * batch['predicted_image'] + (1 - mask) * batch['image']

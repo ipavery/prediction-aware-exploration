@@ -11,19 +11,47 @@ sys.path.append('../lama')
 from saicinpainting.training.trainers import load_checkpoint
 from saicinpainting.training.data.datasets import get_transforms
 from saicinpainting.evaluation.utils import move_to_device
+from saicinpainting.map_pairs import load_satellite_image
 
 def get_lama_transform(transform_variant, out_size):
     map_transform = get_transforms(transform_variant, out_size)
     return map_transform
 
-def convert_obsimg_to_model_input(obs_img, map_transform, device):
-    # Transform the observed image, gets masks, move to device
-    transformed = map_transform(image=obs_img, obs_img=obs_img)
+def convert_obsimg_to_model_input(obs_img, map_transform, device, satellite=None, use_satellite=False):
+    inputs = dict(image=obs_img, obs_img=obs_img)
+    if use_satellite or satellite is not None:
+        if satellite is None:
+            satellite = np.full(obs_img.shape[:2], 0.5, dtype=np.float32)
+        if tuple(satellite.shape) != tuple(obs_img.shape[:2]):
+            raise ValueError('Satellite and observed map must use the same grid')
+        satellite = np.asarray(satellite, dtype=np.float32)
+        if not np.isfinite(satellite).all() or satellite.min() < 0 or satellite.max() > 1:
+            raise ValueError('Satellite must be normalized to [0, 1] before inference')
+        inputs['satellite'] = satellite
+    transformed = map_transform(**inputs)
     obs_img = np.transpose(transformed['obs_img'], (2, 0, 1))
     mask = ((obs_img[0] > 0.49) & (obs_img[0] < 0.51)).astype(np.float32)[None, ...]
-    input_batch = default_collate([{'image': obs_img, 'mask': mask}])
-    input_batch = move_to_device(input_batch, device)
+    sample = {'image': obs_img, 'mask': mask}
+    if 'satellite' in inputs:
+        sample['satellite'] = np.ascontiguousarray(transformed['satellite'][None, ...], dtype=np.float32)
+    input_batch = move_to_device(default_collate([sample]), device)
     return input_batch, mask
+
+
+def load_satellite_prior_for_map(map_folder_path, padded_shape, satellite_dir=None, padding=500):
+    map_id = os.path.basename(os.path.normpath(map_folder_path))
+    if satellite_dir is not None:
+        path = os.path.join(satellite_dir, map_id + '.png')
+        if not os.path.isfile(path):
+            raise FileNotFoundError('Missing supplied satellite footprint: ' + path)
+    else:
+        path = os.path.join(map_folder_path, 'satellite.png')
+        if not os.path.isfile(path):
+            return None
+    interior_shape = (padded_shape[0] - 2 * padding, padded_shape[1] - 2 * padding)
+    prior = load_satellite_image(path, interior_shape)
+    return np.pad(prior, padding, mode='constant', constant_values=0.5) if padding else prior
+
 
 # Visualization
 def load_lama_model(model_path, checkpoint_name='best.ckpt', device='cuda'):

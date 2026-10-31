@@ -20,6 +20,7 @@ from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 from pytorch_lightning.plugins import DDPPlugin
 
 from saicinpainting.training.trainers import make_training_model
+from saicinpainting.training.trainers.satellite_weights import load_pretrained_generator
 from saicinpainting.utils import register_debug_signal_handlers, handle_ddp_subprocess, handle_ddp_parent_process, \
     handle_deterministic_config
 
@@ -52,6 +53,8 @@ def main(config: OmegaConf):
         wandb_logger = WandbLogger(name=os.path.basename(os.getcwd()), project='saicinpainting', config=config)
 
         training_model = make_training_model(config)
+        if config.get('pretrained_generator_path'):
+            load_pretrained_generator(training_model, config.pretrained_generator_path)
 
         trainer_kwargs = OmegaConf.to_container(config.trainer.kwargs, resolve=True)
         if need_set_deterministic:

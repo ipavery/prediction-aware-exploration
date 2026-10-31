@@ -7,6 +7,7 @@ import numpy as np
 
 from torch.utils.data import Dataset
 import torch.nn.functional as F
+from saicinpainting.map_pairs import paired_map_paths, read_map_pair
 
 
 def load_image(fname, mode='RGB', return_orig=False):
@@ -57,59 +58,42 @@ def scale_image(img, factor, interpolation=cv2.INTER_AREA):
 
 
 class InpaintingActualMaskEvalDataset(Dataset):
-    def __init__(self, datadir, transform, pad_out_to_modulo=None, scale_factor=None, num_frames_to_skip=100):
+    def __init__(self, datadir, transform, pad_out_to_modulo=None, scale_factor=None,
+                 num_frames_to_skip=100, use_satellite=False, satellite_shift_px=0):
         self.datadir = datadir
-        self.img_filenames = sorted(list(glob.glob(os.path.join(self.datadir, 'global_gt', '*.png'))))[::num_frames_to_skip]
-        self.obs_img_filenames = sorted(list(glob.glob(os.path.join(self.datadir, 'global_obs', '*.png'))))[::num_frames_to_skip]
-        # print(f'len(self.img_filenames): {len(self.img_filenames)}')
-        # print(f'len(self.obs_img_filenames): {len(self.obs_img_filenames)}')
+        self.img_filenames, self.obs_img_filenames, self.satellite_filenames = paired_map_paths(
+            datadir, num_frames_to_skip, use_satellite)
         self.transform = transform
         self.pad_out_to_modulo = pad_out_to_modulo
         self.scale_factor = scale_factor
+        self.use_satellite = use_satellite
+        if satellite_shift_px:
+            raise ValueError('Validation/inference satellite_shift_px must be 0 for deterministic evaluation')
 
     def __len__(self):
         return len(self.img_filenames)
 
     def __getitem__(self, i):
-        # TODO: abstract to a function shared by both datasets (Train and Eval)
-        obs_path = self.obs_img_filenames[i]
-        obs_img = cv2.imread(obs_path)
-        obs_img = cv2.cvtColor(obs_img, cv2.COLOR_BGR2RGB)
-        gt_path = self.img_filenames[i]
-        gt_img = cv2.imread(gt_path)
-        gt_img = cv2.cvtColor(gt_img, cv2.COLOR_BGR2RGB)
-        transformed = self.transform(image=gt_img, obs_img=obs_img)
-        
-        # get the transformed gt_img 
-        gt_img = transformed['image']
-        gt_img = np.transpose(gt_img, (2, 0, 1))
-        
-        # find the pixels that are > 0.45, and < 0.55, get the observed mask
-        obs_img = transformed['obs_img']
-        obs_img = np.transpose(obs_img, (2, 0, 1))
-        mask = np.zeros((obs_img.shape[1], obs_img.shape[2]))
-        mask = (obs_img[0] > 0.49) & (obs_img[0] < 0.51)
-        # convert to 0, 1 in float32 
-        mask = mask.astype(np.float32)
-        mask = np.expand_dims(mask, axis=0)
-        result = dict(image=gt_img, mask=mask)
-        
-        # print(f'gt_img.shape: {gt_img.shape}')
-        # print(f'mask.shape: {mask.shape}')
-        # import pdb; pdb.set_trace()
-
+        result = read_map_pair(self.img_filenames[i], self.obs_img_filenames[i], self.transform,
+                              self.satellite_filenames[i] if self.use_satellite else None)
         if self.scale_factor is not None:
             result['image'] = scale_image(result['image'], self.scale_factor)
             result['mask'] = scale_image(result['mask'], self.scale_factor, interpolation=cv2.INTER_NEAREST)
-
+            if 'satellite' in result:
+                result['satellite'] = scale_image(result['satellite'], self.scale_factor, interpolation=cv2.INTER_NEAREST)
         if self.pad_out_to_modulo is not None and self.pad_out_to_modulo > 1:
             result['unpad_to_size'] = result['image'].shape[1:]
             result['image'] = pad_img_to_modulo(result['image'], self.pad_out_to_modulo)
             result['mask'] = pad_img_to_modulo(result['mask'], self.pad_out_to_modulo)
-            
-
+            if 'satellite' in result:
+                # Same bottom/right geometry; new satellite coverage is unknown.
+                _, height, width = result['satellite'].shape
+                target_h, target_w = result['image'].shape[1:]
+                result['satellite'] = np.pad(result['satellite'],
+                    ((0, 0), (0, target_h - height), (0, target_w - width)),
+                    mode='constant', constant_values=0.5)
         return result
-    
+
 
 class InpaintingDataset(Dataset):
     def __init__(self, datadir, img_suffix='.jpg', pad_out_to_modulo=None, scale_factor=None):

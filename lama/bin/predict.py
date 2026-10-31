@@ -84,6 +84,11 @@ def main(predict_config: OmegaConf):
         if not predict_config.indir.endswith('/'):
             predict_config.indir += '/'
 
+        satellite_models = any(getattr(model, 'condition_on_satellite', False) for model in model_list)
+        if satellite_models and not predict_config.dataset.get('use_satellite', False):
+            raise ValueError('Use dataset.use_satellite=true with satellite-conditioned checkpoints')
+        if satellite_models and predict_config.get('refine', False):
+            raise ValueError('The optional image refiner does not support satellite conditioning; use refine=false')
         dataset = make_default_val_dataset(predict_config.indir, **predict_config.dataset)
         
         # Key structure

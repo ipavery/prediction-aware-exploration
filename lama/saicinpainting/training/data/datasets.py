@@ -20,49 +20,27 @@ from saicinpainting.evaluation.data import InpaintingDataset as InpaintingEvalua
     InpaintingActualMaskEvalDataset
 from saicinpainting.training.data.aug import IAAAffine2, IAAPerspective2
 from saicinpainting.training.data.masks import get_mask_generator
+from saicinpainting.map_pairs import paired_map_paths, read_map_pair
 
 LOGGER = logging.getLogger(__name__)
 
 class InpaintingTrainActualMaskDataset(Dataset):
-    # Training dataset that uses the actual lidar mask for training
-    def __init__(self, indir, transform, num_frames_to_skip):
-        self.gt_files = sorted(list(glob.glob(os.path.join(indir, 'global_gt', '*.png'))))[::num_frames_to_skip]
-        self.obs_files = sorted(list(glob.glob(os.path.join(indir, 'global_obs', '*.png'))))[::num_frames_to_skip]
-        print("InpaintingTrainActualMaskDataset: len(self.gt_files)", len(self.gt_files))
-        print("InpaintingTrainActualMaskDataset: len(self.obs_files)", len(self.obs_files))
+    def __init__(self, indir, transform, num_frames_to_skip, use_satellite=False, satellite_shift_px=0):
+        self.gt_files, self.obs_files, self.satellite_files = paired_map_paths(
+            indir, num_frames_to_skip, use_satellite)
         self.transform = transform
-        
+        self.use_satellite = use_satellite
+        self.satellite_shift_px = satellite_shift_px
+        print("InpaintingTrainActualMaskDataset:", len(self.gt_files), "matched pairs")
+
     def __len__(self):
         return len(self.gt_files)
-    
+
     def __getitem__(self, item):
-        obs_path = self.obs_files[item]
-        obs_img = cv2.imread(obs_path)
-        obs_img = cv2.cvtColor(obs_img, cv2.COLOR_BGR2RGB)
-        gt_path = self.gt_files[item]
-        gt_img = cv2.imread(gt_path)
-        gt_img = cv2.cvtColor(gt_img, cv2.COLOR_BGR2RGB)
-        transformed = self.transform(image=gt_img, obs_img=obs_img)
-        
-        # get the transformed gt_img 
-        gt_img = transformed['image']
-        gt_img = np.transpose(gt_img, (2, 0, 1))
-        
-        # find the pixels that are > 0.45, and < 0.55, get the observed mask
-        obs_img = transformed['obs_img']
-        obs_img = np.transpose(obs_img, (2, 0, 1))
-        mask = np.zeros((obs_img.shape[1], obs_img.shape[2]))
-        mask = (obs_img[0] > 0.49) & (obs_img[0] < 0.51)
-        # convert to 0, 1 in float32 
-        mask = mask.astype(np.float32)
-        mask = np.expand_dims(mask, axis=0)
-        # print("Getting mask took", time.time() - start_time)
-        # print("mask.shape", mask.shape)
-        # print("mask", np.unique(mask))
-        # print("mask.dytpe", mask.dtype)
-        return dict(image=gt_img,
-                    mask=mask)
-        
+        return read_map_pair(self.gt_files[item], self.obs_files[item], self.transform,
+            self.satellite_files[item] if self.use_satellite else None,
+            satellite_shift_px=self.satellite_shift_px)
+
 
 class InpaintingTrainDataset(Dataset):
     def __init__(self, indir, mask_generator, transform):
@@ -167,21 +145,29 @@ def get_transforms(transform_variant, out_size=None):
         # adjusted_out_size = out_size - (out_size % 8)  # This ensures the size is a multiple of 8
 
         transform = A.Compose([
-            A.PadIfNeeded(min_height=out_size, min_width=out_size, border_mode=cv2.BORDER_CONSTANT, value=0),
+            A.PadIfNeeded(min_height=out_size, min_width=out_size, border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0.5),
             A.RandomCrop(height=out_size, width=out_size),
             A.HorizontalFlip(),
             A.VerticalFlip(),
             A.ToFloat()
         ], 
-        additional_targets={'obs_img': 'image'})
+        additional_targets={'obs_img': 'image', 'satellite': 'mask'})
+    elif transform_variant == 'default_map_val':
+        assert out_size is not None
+        transform = A.Compose([
+            A.PadIfNeeded(min_height=out_size, min_width=out_size,
+                          border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0.5),
+            A.CenterCrop(height=out_size, width=out_size),
+            A.ToFloat()
+        ], additional_targets={'obs_img': 'image', 'satellite': 'mask'})
     elif transform_variant == 'default_map_eval':
         transform = A.Compose([
-            A.PadIfNeeded(min_height=None, min_width=None, pad_height_divisor=16, pad_width_divisor=16, border_mode=cv2.BORDER_CONSTANT, value=0),
+            A.PadIfNeeded(min_height=None, min_width=None, pad_height_divisor=16, pad_width_divisor=16, border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0.5),
             # A.HorizontalFlip(),
             # A.VerticalFlip(),
             A.ToFloat()
         ],         
-        additional_targets={'obs_img': 'image'})
+        additional_targets={'obs_img': 'image', 'satellite': 'mask'})
         
     elif transform_variant == 'distortions':
         transform = A.Compose([
