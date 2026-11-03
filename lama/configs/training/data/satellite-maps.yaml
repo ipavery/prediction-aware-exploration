@@ -17,7 +17,7 @@ train:
     num_workers: ${data.num_workers}
 
 val:
-  indir: ${location.data_root_dir}/test
+  indir: ${location.data_root_dir}/validate
   out_size: 256
   kind: actual_mask
   transform_variant: default_map_val
@@ -29,7 +29,7 @@ val:
     num_workers: ${data.num_workers}
 
 visual_test:
-  indir: ${location.data_root_dir}/test
+  indir: ${location.data_root_dir}/validate
   out_size: 256
   kind: actual_mask
   transform_variant: default_map_val

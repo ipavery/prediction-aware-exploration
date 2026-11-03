@@ -1,6 +1,6 @@
 #!/bin/bash -l
-#SBATCH --job-name=lama-pairs
-#SBATCH --time=00:30:00
+#SBATCH --job-name=generate-lama-pairs
+#SBATCH --time=01:30:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
@@ -12,7 +12,10 @@
 #SBATCH --mail-user=ipa28@byu.edu
 #SBATCH --mail-type=BEGIN,END,FAIL,REQUEUE
 
-# usage: sbatch --export=ALL,MAPS_DIR=/home/ipa28/prediction-aware-exploration/train_maps,DATA_ROOT="$HOME/nobackup/autodelete/lama_map_pairs" collect_lama_pairs.sbatch
+# usage: cd prediction-aware-exploration
+# sbatch --export=ALL,MAPS_DIR=/home/ipa28/prediction-aware-exploration/maps_test_and_train/train_maps,DATA_ROOT="$HOME/nobackup/autodelete/lama_map_pairs" collect_lama_pairs.sbatch
+# or
+# sbatch --export=ALL,MAPS_DIR=/home/ipa28/prediction-aware-exploration/maps_test_and_train/test_maps,DATA_ROOT=/home/ipa28/nobackup/autodelete/lama_map_pairs,SPLIT=test collect_lama_pairs.sbatch
 
 set -eo pipefail
 
@@ -22,6 +25,7 @@ MAPS_DIR="${MAPS_DIR:-}"
 MAX_STEPS="${MAX_STEPS:-200}"
 TARGET_KNOWN_FRACTION="${TARGET_KNOWN_FRACTION:-0.25}"
 DATA_ROOT="${DATA_ROOT:-$HOME/nobackup/autodelete/lama_pairs_${SLURM_JOB_ID}}"
+SPLIT="${SPLIT:-train_3}"
 
 if [[ -z "$MAPS_DIR" || ! -d "$MAPS_DIR" ]]; then
     echo "ERROR: Set MAPS_DIR to a directory containing map subfolders."
@@ -125,13 +129,13 @@ echo "Maps / expected pairs: $MAP_COUNT"
 echo "Step cap: $MAX_STEPS"
 echo "Target known fraction: $TARGET_KNOWN_FRACTION"
 echo "Experiment artifacts: disabled"
-echo "Training pairs: $DATA_ROOT/train_3"
+echo "Training pairs: $DATA_ROOT/$SPLIT"
 echo "Conda environment: $CONDA_DEFAULT_ENV"
 echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-unset}"
 
 # Run from scripts/ so explore.py resolves ../configs; Agg avoids Tk on compute nodes.
 cd "$REPO_ROOT/scripts"
-python -u - "$MAPS_DIR" "$DATA_ROOT" "$MAX_STEPS" "$TARGET_KNOWN_FRACTION" <<'PY'
+python -u - "$MAPS_DIR" "$DATA_ROOT" "$SPLIT" "$MAX_STEPS" "$TARGET_KNOWN_FRACTION" <<'PY'
 import matplotlib
 import os
 import runpy
@@ -141,13 +145,21 @@ import cv2
 
 matplotlib.use("Agg")
 matplotlib.use = lambda *args, **kwargs: None
-maps_dir, data_root, max_steps, target_fraction = sys.argv[1:]
+args = sys.argv[1:]
+if len(args) == 4:
+    maps_dir, data_root, max_steps, target_fraction = args
+    split_name = 'train_3'
+elif len(args) == 5:
+    maps_dir, data_root, split_name, max_steps, target_fraction = args
+else:
+    raise SystemExit('Expected MAPS_DIR DATA_ROOT [SPLIT] MAX_STEPS TARGET_KNOWN_FRACTION')
 sys.argv = [
     "explore.py",
     "--map_dir", maps_dir,
     "--max_steps", max_steps,
     "--target_known_fraction", target_fraction,
     "--training_data_root", data_root,
+    "--training_data_split", split_name,
     "--no_experiment_artifacts",
 ]
 collection = runpy.run_path("explore.py", run_name="__main__")
@@ -156,8 +168,8 @@ collection = runpy.run_path("explore.py", run_name="__main__")
 expected_samples = [item['sample_name'] for item in collection['run_exploration_args']]
 failures = []
 for sample_name in expected_samples:
-    gt_path = os.path.join(data_root, 'train_3', 'global_gt', sample_name + '.png')
-    obs_path = os.path.join(data_root, 'train_3', 'global_obs', sample_name + '.png')
+    gt_path = os.path.join(data_root, split_name, 'global_gt', sample_name + '.png')
+    obs_path = os.path.join(data_root, split_name, 'global_obs', sample_name + '.png')
     gt = cv2.imread(gt_path) if os.path.isfile(gt_path) else None
     obs = cv2.imread(obs_path) if os.path.isfile(obs_path) else None
     if gt is None or obs is None:
@@ -170,5 +182,5 @@ print('Validated {} pairs from collection {}'.format(
     len(expected_samples), collection['collection_id']))
 PY
 
-echo "LaMa pair collection finished. Data: $DATA_ROOT/train_3"
+echo "LaMa pair collection finished. Data: $DATA_ROOT/$SPLIT"
 echo "Expected pairs: $MAP_COUNT"

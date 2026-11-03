@@ -120,7 +120,7 @@ def reselect_frontier_from_frontier_region_centers(frontier_region_centers, tota
 
 
 def save_lama_training_pair(mapper, training_data_root, sample_name, steps_completed,
-                            padding=500, phase='final'):
+                            padding=500, phase='final', training_data_split='train_3'):
     """Save the latest observation, preserving a previous pair if encoding fails."""
     if not sample_name:
         raise ValueError('A sample_name is required for LaMa training pairs')
@@ -128,7 +128,7 @@ def save_lama_training_pair(mapper, training_data_root, sample_name, steps_compl
     obs_train_map = mapper.obs_map[padding:-padding, padding:-padding] if padding else mapper.obs_map
     if gt_train_map.size == 0 or gt_train_map.shape != obs_train_map.shape:
         raise ValueError('Expected matching nonempty GT and observation interiors')
-    split_dir = os.path.join(training_data_root, 'train_3')
+    split_dir = os.path.join(training_data_root, training_data_split)
     gt_dir = os.path.join(split_dir, 'global_gt')
     obs_dir = os.path.join(split_dir, 'global_obs')
     os.makedirs(gt_dir, exist_ok=True)
@@ -242,6 +242,7 @@ def run_exploration_comparison_for_map(args):
     max_steps = args.get('max_steps')
     target_known_fraction = args.get('target_known_fraction')
     training_data_root = args.get('training_data_root')
+    training_data_split = args.get('training_data_split', 'train_3')
     sample_name = args.get('sample_name')
     save_experiment_artifacts = args.get('save_experiment_artifacts', True)
     print("Running exploration comparison for map: ", map_folder_path)
@@ -282,12 +283,12 @@ def run_exploration_comparison_for_map(args):
         run_exploration_for_map(occ_map, comp_exp_title, models_list, lama_model, lama_map_transform, pred_vis_configs, lidar_sim_configs, mode, start_pose, unknown_as_occ, \
             use_distance_transform_for_planning=use_distance_transform_for_planning, upen_config=upen_config,
                 max_steps=max_steps, target_known_fraction=target_known_fraction,
-                training_data_root=training_data_root, sample_name=sample_name,
+                training_data_root=training_data_root, training_data_split=training_data_split, sample_name=sample_name,
                 save_experiment_artifacts=save_experiment_artifacts, satellite_prior=satellite_prior)
 
 def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model, lama_map_transform, pred_vis_configs, lidar_sim_configs, mode, \
     start_pose, unknown_as_occ, use_distance_transform_for_planning, upen_config=None, max_steps=None,
-            target_known_fraction=None, training_data_root=None, sample_name=None,
+            target_known_fraction=None, training_data_root=None, training_data_split='train_3', sample_name=None,
             save_experiment_artifacts=True, satellite_prior=None):
     t = 0
     steps_completed = 0
@@ -367,7 +368,8 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
         if collect_training_pair:
             # Keep a usable pair on disk before frontier detection or planning.
             save_lama_training_pair(mapper, training_data_root, sample_name,
-                                    steps_completed, padding=pd_size, phase='initial')
+                                    steps_completed, padding=pd_size, phase='initial',
+                                    training_data_split=training_data_split)
         ind_to_move_per_step = 3
         pose_list = np.atleast_2d(cur_pose) # Assumes last pose is the current pose
 
@@ -957,7 +959,8 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
             if collect_training_pair and initial_observation_ready:
                 # Also runs on empty frontiers, no path, and later exceptions.
                 save_lama_training_pair(mapper, training_data_root, sample_name,
-                                        steps_completed, padding=pd_size, phase='final')
+                                        steps_completed, padding=pd_size, phase='final',
+                                        training_data_split=training_data_split)
             elif collect_training_pair:
                 print('No training pair saved for {}: initial observation was not completed'.format(
                     sample_name), flush=True)
@@ -994,6 +997,7 @@ if __name__ == '__main__':
     parser.add_argument('--max_steps', type=int, help='Maximum frontier steps per run')
     parser.add_argument('--target_known_fraction', type=float, help='Stop after this fraction of the map interior is observed')
     parser.add_argument('--training_data_root', help='Optional root directory for LaMa training pairs')
+    parser.add_argument('--training_data_split', default='train_3', help='LaMa dataset split directory under training_data_root')
     parser.add_argument('--no_experiment_artifacts', action='store_true', help='Skip experiment images, trajectories, and status files')
     args = parser.parse_args()
     
@@ -1083,6 +1087,7 @@ if __name__ == '__main__':
             'max_steps': args.max_steps,
             'target_known_fraction': args.target_known_fraction,
             'training_data_root': args.training_data_root,
+            'training_data_split': args.training_data_split,
             'save_experiment_artifacts': not args.no_experiment_artifacts,
             'sample_name': f'{collection_id}_sample_{sample_index:06d}'
         }

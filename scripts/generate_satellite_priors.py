@@ -4,9 +4,10 @@
 Requires NumPy and Pillow (no model, GPU, OpenCV, or SciPy required).
 
 Example on the cluster:
+    cd /home/ipa28/prediction-aware-exploration/scripts
     python generate_satellite_priors.py \
         --gt-dir /home/ipa28/nobackup/autodelete/lama_map_pairs/train_3/global_gt \
-        --save-outline
+        --uncertainty-samples 64
 
 By default, writes matching single-channel PNGs to sibling global_satellite/,
 plus a metadata JSONL and a preview. Source GT and observation files are read
@@ -23,8 +24,11 @@ Perturbations affect ONLY the prior, around its centroid. GT contents determine
 the random seed, so repeated observations of the same GT get a consistent prior
 and adding files does not change existing priors. --seed-by filename instead
 creates independent perturbations for differently named pairs of the same GT.
-Fresh jitter and whole-prior dropout during training are still recommended;
-this script makes one reproducible prior per exported pair. No training-model
+Use --uncertainty-samples to average multiple plausible transforms into a
+per-pixel footprint probability. This represents uncertainty in alignment and
+scale as gray values near uncertain boundaries instead of applying an arbitrary
+blur. With the default of one sample, outputs remain binary. Fresh jitter and
+whole-prior dropout during training are still recommended. No training-model
 integration is performed by this utility.
 """
 
@@ -165,6 +169,35 @@ def perturb_footprint(footprint, rng, shift_px=3, rotate_deg=2.0, scale_jitter=0
     return prior, metadata
 
 
+def uncertain_footprint(footprint, rng, samples=1, shift_px=3, rotate_deg=2.0,
+                        scale_jitter=0.02, boundary_jitter=1):
+    """Average plausible footprint transforms into per-pixel probabilities."""
+    if samples < 1:
+        raise ValueError('uncertainty sample count must be positive')
+    probability = np.zeros(footprint.shape, dtype=np.float32)
+    transforms = []
+    for _ in range(samples):
+        sample, metadata = perturb_footprint(
+            footprint, rng, shift_px, rotate_deg, scale_jitter, boundary_jitter)
+        probability += sample
+        transforms.append(metadata)
+    probability /= float(samples)
+    metadata = dict(
+        uncertainty_samples=samples,
+        mean_dx_px=float(np.mean([m['dx_px'] for m in transforms])),
+        mean_dy_px=float(np.mean([m['dy_px'] for m in transforms])),
+        mean_angle_deg=float(np.mean([m['angle_deg'] for m in transforms])),
+        mean_scale=float(np.mean([m['scale'] for m in transforms])),
+        mean_boundary_bias_px=float(np.mean([m['boundary_bias_px'] for m in transforms])),
+        prior_pixels_at_probability_ge_0_5=int((probability >= 0.5).sum()),
+        expected_prior_pixels=float(probability.sum()),
+    )
+    if samples == 1:
+        metadata.update(transforms[0])
+        metadata['uncertainty_samples'] = 1
+    return probability, metadata
+
+
 def outline(mask):
     return mask & ~morph(mask, 1, 'erode')
 
@@ -199,14 +232,17 @@ def preview(samples, destination):
     canvas = Image.new('RGB', (4 * cell_w + 40, len(samples) * cell_h + 90), '#edf1f5')
     draw = ImageDraw.Draw(canvas)
     draw.text((22, 14), 'Simulated satellite footprint: extent, not indoor occupancy', font=font(23), fill='#172738')
-    titles = ('GT (display: dark walls)', 'Clean filled footprint', 'Perturbed filled prior', 'GT + perturbed outline')
+    titles = ('GT (display: dark walls)', 'Clean filled footprint', 'Perturbed prior probability', 'GT + 50% prior boundary')
     for row, (name, gt, clean, prior, metadata) in enumerate(samples):
-        edge = outline(prior)
+        likely_prior = prior >= 0.5
+        edge = outline(likely_prior)
         base = np.repeat((255 - gt)[:, :, None], 3, axis=2)
         fill = np.full(base.shape, 242, dtype=np.uint8)
         fill[clean] = (17, 126, 139)
-        disturbed = np.full(base.shape, 242, dtype=np.uint8)
-        disturbed[prior] = (17, 126, 139)
+        background_color = np.array((242, 242, 242), dtype=np.float32)
+        footprint_color = np.array((17, 126, 139), dtype=np.float32)
+        weights = np.clip(prior, 0, 1)[:, :, None]
+        disturbed = np.rint(background_color * (1 - weights) + footprint_color * weights).astype(np.uint8)
         overlay = base.copy()
         overlay[edge] = (226, 103, 37)
         arrays = (base, fill, disturbed, overlay)
@@ -220,7 +256,7 @@ def preview(samples, destination):
             canvas.paste(img, (x + (cell_w - 10 - img.width) // 2, y + 40 + (250 - img.height) // 2))
             label = name[:33] if col == 0 else ''
             if col == 2:
-                label = 'shift ({}, {}), rotation {:.1f} deg'.format(metadata['dx_px'], metadata['dy_px'], metadata['angle_deg'])
+                label = '{} transforms; gray = uncertain'.format(metadata['uncertainty_samples'])
             if col == 3:
                 label = 'Diagnostic overlay; not model input'
             draw.text((x + 9, y + 294), label, font=font(13), fill='#425268')
@@ -238,6 +274,8 @@ def main():
     parser.add_argument('--rotate-deg', type=float, default=2.0)
     parser.add_argument('--scale-jitter', type=float, default=0.02)
     parser.add_argument('--boundary-jitter', type=int, default=1)
+    parser.add_argument('--uncertainty-samples', type=int, default=1,
+                        help='Average this many plausible transforms into a soft probability prior (default: 1, binary)')
     parser.add_argument('--seed', type=int, default=17)
     parser.add_argument('--seed-by', choices=('gt', 'filename'), default='gt')
     parser.add_argument('--save-outline', action='store_true')
@@ -250,6 +288,8 @@ def main():
         parser.error('--scale-jitter must be finite and in [0, 1)')
     if args.min_component < 1:
         parser.error('--min-component must be positive')
+    if args.uncertainty_samples < 1:
+        parser.error('--uncertainty-samples must be positive')
     gt_dir = args.gt_dir.expanduser().resolve()
     paths = sorted(gt_dir.glob('*.png'))
     if not paths:
@@ -278,9 +318,10 @@ def main():
             clean = extract_footprint(walls, args.close_radius, args.min_component, args.method)
             gt_content_key = hashlib.sha256(str(gt.shape).encode('ascii') + gt.tobytes()).hexdigest()
             seed_key = gt_content_key if args.seed_by == 'gt' else path.stem
-            prior, metadata = perturb_footprint(clean, sample_rng(seed_key, args.seed),
-                args.shift_px, args.rotate_deg, args.scale_jitter, args.boundary_jitter)
-            if not prior.any():
+            prior, metadata = uncertain_footprint(clean, sample_rng(seed_key, args.seed),
+                args.uncertainty_samples, args.shift_px, args.rotate_deg,
+                args.scale_jitter, args.boundary_jitter)
+            if not np.any(prior):
                 raise ValueError('Perturbation removed entire footprint: ' + str(path))
             warnings = []
             filled_pixels = int((clean & ~walls).sum())
@@ -288,9 +329,10 @@ def main():
                 warnings.append('Little enclosed interior recovered; check exterior gaps and footprint extraction')
             if prior[0].any() or prior[-1].any() or prior[:, 0].any() or prior[:, -1].any():
                 warnings.append('Prior touches image edge; footprint may be clipped')
-            mask_image(prior).save(output_dir / path.name)
+            prior_png = np.rint(np.clip(prior, 0, 1) * 255).astype(np.uint8)
+            Image.fromarray(prior_png, mode='L').save(output_dir / path.name)
             if args.save_outline:
-                mask_image(outline(prior)).save(outline_dir / path.name)
+                mask_image(outline(prior >= 0.5)).save(outline_dir / path.name)
             metadata.update(name=path.name, gt_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
                 height=int(gt.shape[0]), width=int(gt.shape[1]),
                 clean_footprint_pixels=int(clean.sum()), filled_interior_pixels=filled_pixels,

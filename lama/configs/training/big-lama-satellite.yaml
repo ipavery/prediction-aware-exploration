@@ -6,7 +6,7 @@ training_model:
   visualize_each_iters: 50
   concat_mask: true
   condition_on_satellite: true
-  satellite_dropout: 0.2
+  satellite_dropout: 0
   store_discr_outputs_for_vis: true
 losses:
   l1:
