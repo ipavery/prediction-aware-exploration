@@ -6,7 +6,7 @@ Requires NumPy and Pillow (no model, GPU, OpenCV, or SciPy required).
 Example on the cluster:
     cd /home/ipa28/prediction-aware-exploration/scripts
     python generate_satellite_priors.py \
-        --gt-dir /home/ipa28/nobackup/autodelete/lama_map_pairs/train_3/global_gt \
+        --gt-dir /home/ipa28/nobackup/autodelete/lama_map_pairs/test/global_gt \
         --uncertainty-samples 64
 
 By default, writes matching single-channel PNGs to sibling global_satellite/,

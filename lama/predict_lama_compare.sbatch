@@ -33,7 +33,9 @@ export TORCH_HOME="$HOME/.cache/torch"
 
 CONDA_BASE="$(conda info --base)"
 source "$CONDA_BASE/etc/profile.d/conda.sh"
+set +u
 conda activate pipe
+set -u
 
 for model_dir in "$BASE_MODEL" "$SATELLITE_MODEL"; do
     if [[ ! -f "$model_dir/config.yaml" ]]; then
