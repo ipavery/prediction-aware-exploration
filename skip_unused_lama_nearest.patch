@@ -1,0 +1,53 @@
+diff --git a/scripts/explore.py b/scripts/explore.py
+index 081bfca..bf5047c 100644
+--- a/scripts/explore.py
++++ b/scripts/explore.py
+@@ -1050,23 +1050,31 @@ if __name__ == '__main__':
+         os.makedirs(output_root_dir, exist_ok=True)
+     
+     model_list = []
+-    device = collect_opts.lama_device
+-
+-    #ensemble of lama models (G_i; G_1, G_2, G_3 in the paper) - fine-tuned with split, smaller training sets
+-    if collect_opts.ensemble_folder_name is not None:
+-        ensemble_folder_name = collect_opts.ensemble_folder_name
+-        ensemble_folder_path = os.path.join(root_path, 'pretrained_models', ensemble_folder_name)
+-        ensemble_model_dirs = sorted(os.listdir(ensemble_folder_path))
+-        for ensemble_model_dir in ensemble_model_dirs:
+-            ensemble_model_path = os.path.join(ensemble_folder_path, ensemble_model_dir)
+-            model = load_lama_model(ensemble_model_path, device=collect_opts.lama_device)
+-            print("Loaded model: ", ensemble_model_dir)
+-            model_list.append(model)
+-    
+-    #setup a big lama model (G in the paper) - fine-tuned with the entire training set
+-    big_lama_path = os.path.join(root_path, 'pretrained_models', collect_opts.big_lama_model_folder_name)
+-    lama_model = load_lama_model(big_lama_path, device=collect_opts.lama_device)
+-    lama_map_transform = get_lama_transform(collect_opts.lama_transform_variant, collect_opts.lama_out_size)
++    lama_model = None
++    lama_map_transform = None
++    needs_lama = bool(collect_opts.log_iou) or any(
++        determine_use_model(mode) for mode in collect_opts.modes_to_test
++    )
++    if needs_lama:
++        device = collect_opts.lama_device
++
++        # Load the ensemble used by model-based planners.
++        if collect_opts.ensemble_folder_name is not None:
++            ensemble_folder_name = collect_opts.ensemble_folder_name
++            ensemble_folder_path = os.path.join(root_path, 'pretrained_models', ensemble_folder_name)
++            ensemble_model_dirs = sorted(os.listdir(ensemble_folder_path))
++            for ensemble_model_dir in ensemble_model_dirs:
++                ensemble_model_path = os.path.join(root_path, 'pretrained_models', ensemble_folder_name, ensemble_model_dir)
++                model = load_lama_model(ensemble_model_path, device=device)
++                print("Loaded model: ", ensemble_model_dir)
++                model_list.append(model)
++
++        # Load big LaMa only when selected modes need its predictions.
++        big_lama_path = os.path.join(root_path, 'pretrained_models', collect_opts.big_lama_model_folder_name)
++        lama_model = load_lama_model(big_lama_path, device=device)
++        lama_map_transform = get_lama_transform(collect_opts.lama_transform_variant, collect_opts.lama_out_size)
++    else:
++        print("Skipping LaMa model loading: selected modes do not use LaMa")
+ 
+     run_exploration_args = []
+     collection_id = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
