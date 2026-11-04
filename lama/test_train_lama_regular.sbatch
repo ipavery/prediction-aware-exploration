@@ -14,7 +14,7 @@
 
 # usage: 
 # cd /home/ipa28/prediction-aware-exploration/lama
-# sbatch test_train_lama_regular.sbatch
+#   
 
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 export WANDB_MODE=offline
@@ -22,12 +22,16 @@ export TORCH_HOME="$HOME/.cache/torch"
 DATA=/home/ipa28/nobackup/autodelete/lama_map_pairs
 OUT=/home/ipa28/nobackup/autodelete/lama_regular_training
 mkdir -p "$OUT/experiments" "$OUT/tb_logs"
-python -u bin/train.py -cn big-lama-satellite \
+python -u bin/train.py -cn big-lama \
     location=kth_train_3 \
     location.data_root_dir="$DATA" \
     location.out_root_dir="$OUT/experiments" \
     location.tb_dir="$OUT/tb_logs" \
-    pretrained_generator_path=/home/ipa28/prediction-aware-exploration/pretrained_models/weights/big_lama/models/best.ckpt \
+    data=satellite-maps \
+    data.train.use_satellite=false \
+    data.val.use_satellite=false \
+    data.visual_test.use_satellite=false \
+    +pretrained_generator_path=/home/ipa28/prediction-aware-exploration/pretrained_models/weights/big_lama/models/best.ckpt \
     trainer.kwargs.gpus=1 data.batch_size=2 \
     trainer.kwargs.max_epochs=30 \
     trainer.kwargs.num_sanity_val_steps=0 \

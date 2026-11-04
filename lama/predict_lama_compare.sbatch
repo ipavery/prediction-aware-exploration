@@ -23,7 +23,7 @@ set -euo pipefail
 REPO=/home/ipa28/prediction-aware-exploration
 DATA=/home/ipa28/nobackup/autodelete/lama_map_pairs
 OUTPUT_ROOT=/home/ipa28/nobackup/autodelete/lama_satellite_training/predictions
-BASE_MODEL="$REPO/pretrained_models/weights/big_lama"
+BASE_MODEL="/home/ipa28/nobackup/autodelete/lama_regular_training/experiments/ipa28_2026-11-02_22-50-10_train_big-lama_"
 SATELLITE_MODEL=/home/ipa28/nobackup/autodelete/lama_satellite_training/experiments/ipa28_2026-10-31_22-39-29_train_big-lama-satellite_satellite
 CHECKPOINT=best.ckpt
 
