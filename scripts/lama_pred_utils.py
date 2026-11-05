@@ -41,14 +41,6 @@ def load_lama_model(model_path, checkpoint_name='best.ckpt', device='cuda'):
 
 
 def visualize_prediction(batch_pred, mask):
-    cur_gt = batch_pred['image'][0].permute(1, 2, 0).cpu().numpy()
     cur_res = np.clip(batch_pred['inpainted'][0].permute(1, 2, 0).detach().cpu().numpy() * 255, 0, 255).astype('uint8')
     cur_res = cv2.cvtColor(cur_res, cv2.COLOR_RGB2BGR)
-    cur_gt = np.clip(cur_gt * 255, 0, 255).astype('uint8')
-    cur_gt = cv2.cvtColor(cur_gt, cv2.COLOR_RGB2BGR)
-
-    gt_masked = cur_gt.copy()
-    gt_masked[mask[0] > 0] = 122
-    disp_output = np.vstack([cur_gt, gt_masked, cur_res])
-    cv2.imwrite('lama_pred.png', disp_output)
     return cur_res

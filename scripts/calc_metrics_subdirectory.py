@@ -612,8 +612,10 @@ def calculate_iou_kth(pred_array, gt_array, show_plt=False, file_name=None):
     # print("original gt_array shape is: ", gt_array.shape)
     # print("original gt_array sum is: ", np.sum(gt_array))
 
-    # Threshold the predicted result to convert to binary mask
-    predicted_binary = (pred_array > 0.5).astype(np.uint8)
+    # Threshold the predicted result to convert to binary mask.
+    # explore.py passes the 0-255 LaMa image, where occupied is > 128 (as in get_pred_maputils_from_viz).
+    occ_threshold = 128 if pred_array.dtype == np.uint8 else 0.5
+    predicted_binary = (pred_array > occ_threshold).astype(np.uint8)
 
     #gt_array_binary = (gt_array > 0.5).astype(np.uint8) if gt_array_mask.max() > 1 else gt_array_mask.astype(np.uint8)
     gt_array_binary = (gt_array > 0.5).astype(np.uint8) if gt_array.max() > 1 else gt_array.astype(np.uint8)
