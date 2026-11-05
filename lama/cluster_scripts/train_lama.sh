@@ -7,6 +7,16 @@
 #SBATCH --gpus=v100-32:1
 #SBATCH --cpus-per-task=4
 
+# Requires WANDB_API_KEY in the environment; never hardcode the key in this file.
+# Export it in the shell you submit from (sbatch forwards your environment by default):
+#   export WANDB_API_KEY=<your key from https://wandb.ai/authorize>
+#   sbatch cluster_scripts/train_lama.sh
+# The check expands ${WANDB_API_KEY:+set}, not the key itself, so `set -x` can't log it.
+if [ -z "${WANDB_API_KEY:+set}" ]; then
+    echo "ERROR: WANDB_API_KEY is not set. Export your Weights & Biases API key (https://wandb.ai/authorize) before running or submitting this script." >&2
+    exit 1
+fi
+
 # Load necessary modules, if required
 set -x
 # Activate Conda environment
@@ -15,7 +25,6 @@ source activate lama
 # Navigate to your project directory (if not submitting the job from there)
 cd /ocean/projects/cis220039p/cherieho/map-explore/lama
 export TORCH_HOME=$(pwd) && export PYTHONPATH=$(pwd)
-export WANDB_API_KEY=97df59ceef60fe2f1a45ac4a14272e2d6ff54487
 export WANDB_DEBUG=true
 export LC_ALL=C.UTF-8
 export LANG=C.UTF-8
