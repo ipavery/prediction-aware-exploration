@@ -65,6 +65,10 @@ Thumbs.db
 train_maps
 test_maps
 
+#kth dataset png files
+1124_datacollect_v2_jobs_global_split_to_3
+1124_datacollect_v2_jobs_global_split_to_3.zip
+
 #ignore large files (over 100MB)
 kth_test_maps/Train_asia_china_T3_floor_3/occ_map.npy
 kth_test_maps/Train_asia_china_T3_floor_3/valid_space.npy
