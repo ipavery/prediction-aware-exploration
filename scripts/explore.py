@@ -9,7 +9,6 @@ from torchvision.transforms import ToTensor, Resize, Compose
 import pyastar2d    
 import json
 from skimage.measure import block_reduce
-import albumentations as A
 import traceback
 import argparse
 from pdb import set_trace as bp
@@ -25,7 +24,8 @@ from scripts import simple_mask_utils as smu
 import scripts.sim_utils as sim_utils
 import upen_baseline
 import matplotlib
-matplotlib.use('TkAgg')
+# TkAgg needs a display; headless batch jobs only save figures, so use Agg there
+matplotlib.use('TkAgg' if os.environ.get('DISPLAY') else 'Agg')
 import matplotlib.pyplot as plt
 from datetime import datetime
 from contextlib import contextmanager
@@ -62,7 +62,7 @@ def get_lama_pred_from_obs(cur_obs_img, lama_model, lama_map_transform, device, 
     input_lama_batch, lama_mask = convert_obsimg_to_model_input(cur_obs_img_3chan, lama_map_transform, device,
         satellite=satellite_prior, use_satellite=True)
     lama_pred_alltrain = lama_model(input_lama_batch)
-    lama_pred_alltrain_viz = visualize_prediction(lama_pred_alltrain, lama_mask)
+    lama_pred_alltrain_viz = unpad_lama_output(visualize_prediction(lama_pred_alltrain, lama_mask), cur_obs_img.shape)
     return cur_obs_img_3chan, input_lama_batch, lama_mask, lama_pred_alltrain, lama_pred_alltrain_viz
 
 def get_pred_maputils_from_viz(viz_map):
@@ -70,19 +70,11 @@ def get_pred_maputils_from_viz(viz_map):
     pred_maputils[viz_map[:,:,0] > 128] = 1 # occ
     return pred_maputils
 
-def get_lama_padding_transform():
-    lama_padding_transform = A.PadIfNeeded(min_height=None, min_width=None, pad_height_divisor=16, pad_width_divisor=16, border_mode=cv2.BORDER_CONSTANT, value=0)
-    return lama_padding_transform
-
-def get_padded_obs_map(obs_map):
-    lama_padding_transform = get_lama_padding_transform()
-    padded_obs_map = lama_padding_transform(image=obs_map)['image']
-    return padded_obs_map
-
-def get_padded_gt_map(gt_map):
-    lama_padding_transform = get_lama_padding_transform()
-    padded_gt_map = lama_padding_transform(image=gt_map)['image']
-    return padded_gt_map
+def unpad_lama_output(lama_output, map_shape):
+    # LaMa's transform pads the map (centered) to a multiple of 16, so crop its output back to the map frame
+    pad_top = (lama_output.shape[0] - map_shape[0]) // 2
+    pad_left = (lama_output.shape[1] - map_shape[1]) // 2
+    return lama_output[pad_top:pad_top + map_shape[0], pad_left:pad_left + map_shape[1]]
 
 def is_locked_frontier_center_valid(locked_frontier_center, occ_grid_pyastar, cur_pose, collect_opts, pixel_per_meter):
     if locked_frontier_center is None:
@@ -96,27 +88,21 @@ def is_locked_frontier_center_valid(locked_frontier_center, occ_grid_pyastar, cu
         return False
     return True
 
-def reselect_frontier_from_frontier_region_centers(frontier_region_centers, total_cost, t, start_exp_time, mission_status_save_path):
-    frontier_selected = False
-    
-    # First check if we have any frontiers left
+def reselect_frontier_from_frontier_region_centers(frontier_region_centers, total_cost, rejected_frontier, t, start_exp_time, mission_status_save_path):
+    # Drop the frontier that was just rejected, then lock the cheapest one left.
+    # The new choice stays in the list, so it is dropped only if it is rejected too.
+    frontier_region_centers = np.asarray(frontier_region_centers)
+    total_cost = np.asarray(total_cost)
+    if rejected_frontier is not None and len(frontier_region_centers) > 0:
+        keep = ~np.all(frontier_region_centers == np.asarray(rejected_frontier), axis=1)
+        frontier_region_centers, total_cost = frontier_region_centers[keep], total_cost[keep]
+
     if len(frontier_region_centers) == 0:
         update_mission_status(start_time=start_exp_time, cur_step=t, mission_complete=False, fail_reason="frontier_region_centers", mission_status_save_path=mission_status_save_path)
-        return frontier_selected, None, frontier_region_centers, total_cost
-    
-    # Find the minimum cost index
-    min_cost_idx = np.argmin(total_cost)
-    
-    # Store the minimum cost frontier before deletion
-    locked_frontier_center = np.array(frontier_region_centers[min_cost_idx], copy=True)
-    
-    # Remove the selected frontier and its cost
-    frontier_region_centers = np.delete(frontier_region_centers, min_cost_idx, axis=0)
-    total_cost = np.delete(total_cost, min_cost_idx, axis=0)
-    
-    # The selected frontier remains usable even if no alternatives remain.
-    frontier_selected = True
-    return frontier_selected, locked_frontier_center, frontier_region_centers, total_cost
+        return False, None, None, None
+
+    locked_frontier_center = frontier_region_centers[np.argmin(total_cost)]
+    return True, locked_frontier_center, frontier_region_centers, total_cost
 
 
 def save_lama_training_pair(mapper, training_data_root, sample_name, steps_completed,
@@ -352,7 +338,6 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
             var_map = None
             mean_map = None
             lama_reduced_pred_var = None 
-            padded_gt_map = None
         else:
             raise ValueError(f"Unknown method: {mode}")
 
@@ -373,22 +358,7 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
         ind_to_move_per_step = 3
         pose_list = np.atleast_2d(cur_pose) # Assumes last pose is the current pose
 
-        #there is a small offset between observed map size and lama prediction output size
-        gt_h, gt_w = mapper.gt_map.shape[0],mapper.gt_map.shape[1]
-        pad_h = gt_h%16
-        pad_w = gt_w%16
-        if pad_h == 0:
-            pad_h1 = 0
-            pad_h2 = 0
-        else:
-            pad_h1 = int((16-pad_h)/2)
-            pad_h2 = 16-pad_h - pad_h1
-        if pad_w == 0:
-            pad_w1 = 0
-            pad_w2 = 0
-        else:
-            pad_w1 = int((16-pad_w)/2)
-            pad_w2 = 16-pad_w - pad_w1
+        pd_size = 500 #padding_size; padded pixels for raycast at the boundary of map
 
         # initial saves (gt_map, pose_list)
         if save_experiment_artifacts:
@@ -467,12 +437,10 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                                 get_lama_pred_from_obs(hector_cur_obs_img, lama_alltrain_model, lama_map_transform, device, satellite_prior=satellite_prior)
                             pred_maputils = get_pred_maputils_from_viz(lama_pred_alltrain_viz)
                             hector_frontier_region_centers_unscored = frontier_region_centers_unscored
-                            padded_obs_map = get_padded_obs_map(mapper.obs_map)
-                            padded_gt_map = get_padded_gt_map(mapper.gt_map)
                             frontier_region_centers, frontier_cost_list, viz_most_flooded_grid, viz_medium_flooded_grid, best_ind, medium_ind = \
                                     frontier_planner.score_frontiers(hector_frontier_region_centers_unscored, cur_pose, \
                                                                     pose_list, pred_maputils, pred_vis_configs, \
-                                                                        obs_map=padded_obs_map, mean_map=mean_map, var_map=var_map)
+                                                                        obs_map=mapper.obs_map, mean_map=mean_map, var_map=var_map)
 
                 # Get inflated obs map for local planner
                 occ_grid_pyastar = mapper.get_inflated_planning_maps(unknown_as_occ=unknown_as_occ)   
@@ -506,7 +474,6 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                         pred_maputils = None
                         var_map = None
                         mean_map = None
-                        padded_gt_map = None
                         if use_model:
                             cur_obs_img = mapper.obs_map.copy()
                             # LAMA global prediction (trained with all training set)
@@ -521,7 +488,7 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                                 lama_pred = model(input_lama_batch)
                                 #print("Prediction took {} seconds".format(np.round(time.time() - pred_time_start, 2)))
                                 lama_pred_viz = visualize_prediction(lama_pred, lama_mask)
-                                lama_pred_onechan = lama_pred['inpainted'][0][0]
+                                lama_pred_onechan = unpad_lama_output(lama_pred['inpainted'][0][0], cur_obs_img.shape)
                                 lama_pred_list.append(lama_pred_onechan)
 
                             
@@ -532,9 +499,6 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
 
                             pred_maputils = get_pred_maputils_from_viz(lama_pred_alltrain_viz)
                         
-                        padded_obs_map = get_padded_obs_map(mapper.obs_map)
-                        padded_gt_map = get_padded_gt_map(mapper.gt_map)
-
                         if mode == 'upen': # not a frontier-based approach, but we will output UPEN RRT goal as a frontier to visit to use go to frontier logic
                             upen_path = None
                             while upen_path is None:
@@ -547,7 +511,7 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                                 upen_rrt_straight_line = upen_config['rrt_straight_line']
                                 upen_reach_horizon = upen_config['reach_horizon']
                                 pose_coords = torch.tensor([[[cur_pose[1], cur_pose[0]]]]).cuda()
-                                planning_grid = torch.tensor(padded_obs_map).cuda() 
+                                planning_grid = torch.tensor(mapper.obs_map).cuda() 
                                 end_pose = [planning_grid.shape[0]-20, planning_grid.shape[1]-20]
                                 goal_pose_coords = torch.tensor([[[end_pose[1], end_pose[0]]]]).cuda()
                                 
@@ -593,22 +557,24 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
 
                                 frontier_region_centers, frontier_cost_list, viz_most_flooded_grid, viz_medium_flooded_grid, best_ind, medium_ind, locked_frontier_center \
                                     = frontier_planner.score_frontiers_pathwise(t, valid_frontiers_unscored, path_collection, pred_maputils, pred_vis_configs, \
-                                                                            obs_map=padded_obs_map, mean_map=mean_map, var_map=var_map)    
+                                                                            obs_map=mapper.obs_map, mean_map=mean_map, var_map=var_map)    
                             
                             else: # Do point-wise method
                                 frontier_region_centers, frontier_cost_list, viz_most_flooded_grid, viz_medium_flooded_grid, best_ind, medium_ind = \
                                         frontier_planner.score_frontiers(frontier_region_centers_unscored, cur_pose, \
                                                                         pose_list, pred_maputils, pred_vis_configs, \
-                                                                            obs_map=padded_obs_map, mean_map=mean_map, var_map=var_map)
+                                                                            obs_map=mapper.obs_map, mean_map=mean_map, var_map=var_map)
                                 locked_frontier_center = frontier_region_centers[np.argmin(frontier_cost_list)]
 
                             while not is_locked_frontier_center_valid(locked_frontier_center, occ_grid_pyastar, cur_pose, collect_opts, pixel_per_meter):
                                 print("Invalid locked frontier center, reselecting")
-                                frontier_selected, locked_frontier_center, frontier_region_centers, frontier_cost_list = reselect_frontier_from_frontier_region_centers(frontier_region_centers, frontier_cost_list, t, start_exp_time, mission_status_save_path)
+                                frontier_selected, locked_frontier_center, frontier_region_centers, frontier_cost_list = reselect_frontier_from_frontier_region_centers(frontier_region_centers, frontier_cost_list, locked_frontier_center, t, start_exp_time, mission_status_save_path)
                                 if not frontier_selected:
                                     mission_failed = True
                                     update_mission_status(start_time=start_exp_time, cur_step=t, mission_complete=False, fail_reason="frontier_region_centers", mission_status_save_path=mission_status_save_path)
                                     break
+                            if mission_failed:
+                                break # No goal is left; stop instead of planning A* to no goal
 
                 else: # Hector Explorer Baseline, from frontier clusters (frontier region centers), make a cost map
                     if do_hector_plan: # Do Hector cost map calculation every 1 time steps
@@ -647,7 +613,7 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                         break
                     path = pyastar2d.astar_path(occ_grid_pyastar, cur_pose, locked_frontier_center, allow_diagonal=False)
                     while path is None:
-                        frontier_selected, locked_frontier_center, frontier_region_centers, frontier_cost_list = reselect_frontier_from_frontier_region_centers(frontier_region_centers, frontier_cost_list, t, start_exp_time, mission_status_save_path)
+                        frontier_selected, locked_frontier_center, frontier_region_centers, frontier_cost_list = reselect_frontier_from_frontier_region_centers(frontier_region_centers, frontier_cost_list, locked_frontier_center, t, start_exp_time, mission_status_save_path)
                         if not frontier_selected:
                             mission_failed = True
                             update_mission_status(start_time=start_exp_time, cur_step=t, mission_complete=False, fail_reason="frontier_region_centers", mission_status_save_path=mission_status_save_path)
@@ -675,7 +641,7 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                             get_lama_pred_from_obs(mapper.obs_map.copy(), lama_alltrain_model, lama_map_transform, device, satellite_prior=satellite_prior)
 
                     iou = calculate_iou_kth(lama_pred_alltrain_viz_t[500:-500, 500:-500, :], 
-                                            padded_gt_map[500:-500, 500:-500], 
+                                            mapper.gt_map[500:-500, 500:-500],
                                             show_plt=False, 
                                             file_name=file_name)
 
@@ -733,7 +699,8 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                                             locked_frontier_center[0] - pd_size,
                                             c='r', s=20, marker='x', cmap='plasma')
 
-                            if len(frontier_colors) > 1:
+                            # A reselection drops rejected goals from the list, so this index can be stale
+                            if len(frontier_colors) > 1 and 0 <= medium_ind < len(frontier_region_centers):
                                 # Plot the second-best frontier with size 10 and its color (only if available)
                                 ax_gt.scatter(np.array(frontier_region_centers)[medium_ind, 1] - pd_size,
                                             np.array(frontier_region_centers)[medium_ind, 0] - pd_size,
@@ -779,7 +746,7 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                             #flooded_ind_colors_alpha[flooded_ind[0],flooded_ind[1],:] = (207/255,3/255,252/255,0.25)   # purple                            
                             ###ax_obs.scatter(flooded_ind[1]-pad_w1, flooded_ind[0]-pad_h1,c="#FF9F1C",s=1,alpha=0.05)
                             if mode in ['nbv-2d', 'pw-nbv-2d']:  # Show flooded grid for nbv-2d and pw-nbv-2d modes
-                                ax_obs.imshow(flooded_ind_colors_alpha[pd_size+pad_h1:-(pd_size+pad_h2),pd_size+pad_w1:-(pd_size+pad_w2)])
+                                ax_obs.imshow(flooded_ind_colors_alpha[pd_size:-pd_size,pd_size:-pd_size])
 
                     ax_obs.set_title('Observed Map')
 
@@ -795,7 +762,7 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                             colors = [white, orange]
                             n_bins = 10
                             var_cmap = LinearSegmentedColormap.from_list("custom_green_var", colors, N=n_bins)
-                            ax_pred_var.imshow(var_map[pd_size+pad_w1:-(pd_size+pad_w2),pd_size+pad_h1:-(pd_size+pad_h2)].cpu().numpy(), vmin=0, vmax=0.3, cmap=var_cmap)
+                            ax_pred_var.imshow(var_map[pd_size:-pd_size,pd_size:-pd_size].cpu().numpy(), vmin=0, vmax=0.3, cmap=var_cmap)
                             ax_pred_var.set_title('Predicted Map Variance')
                             
                             # for model_i in range(len(models_list)):
@@ -821,7 +788,7 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
 
                                 #overlay observed(known) occupied cells on top of the predicted map
                                 obs_occ_mask = np.zeros_like(mean_map[pd_size:-(pd_size),pd_size:-(pd_size)])
-                                occupied_indices_in_obsmap = np.where(mapper.obs_map[pd_size-pad_h1:-(pd_size-pad_h2),pd_size-pad_w1:-(pd_size-pad_w2)] == 1.0) #indices where obs_map is occupied
+                                occupied_indices_in_obsmap = np.where(mapper.obs_map[pd_size:-pd_size,pd_size:-pd_size] == 1.0) #indices where obs_map is occupied
                                 obs_occ_mask[occupied_indices_in_obsmap] = 1
                                 obs_occ_mask_colors = ["#000000","#000000"]
                                 obs_occ_mask_cmap = LinearSegmentedColormap.from_list("mask_black",obs_occ_mask_colors,N=2)
@@ -832,7 +799,7 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
 
                                 #overlay unknown(obs_map) cells as gray tint
                                 obs_unk_mask = np.zeros_like(mean_map[pd_size:-pd_size,pd_size:-pd_size])
-                                unknown_indices_in_obs_map = np.where(mapper.obs_map[pd_size-pad_h1:-(pd_size-pad_h2),pd_size-pad_w1:-(pd_size-pad_w2)] == 0.5) #indices of unknown cells in obs_map
+                                unknown_indices_in_obs_map = np.where(mapper.obs_map[pd_size:-pd_size,pd_size:-pd_size] == 0.5) #indices of unknown cells in obs_map
                                 obs_unk_mask[unknown_indices_in_obs_map] = 1
                                 grey = "#909090" #tunable grey value
                                 obs_unk_mask_colors = [grey,grey]
@@ -845,14 +812,14 @@ def run_exploration_for_map(occ_map, exp_title, models_list,lama_alltrain_model,
                                 #path_color = "#417CF2" #blue
                                 path_color = "#eb4205" #coral(red)
                                 if pose_list is not None:
-                                    ax_mean_map.plot(pose_list[:, 1]-(pd_size-pad_w1), pose_list[:, 0]-(pd_size-pad_h1), c=path_color, alpha=1.0)
+                                    ax_mean_map.plot(pose_list[:, 1]-pd_size, pose_list[:, 0]-pd_size, c=path_color, alpha=1.0)
                                     #ax_mean_map.scatter(pose_list[-1, 1]-(pd_size-pad_w1), pose_list[-1, 0]-(pd_size-pad_h1), c='g', s=10, marker='*')
                                 if mode not in ['upen', 'hector', 'hectoraug']: # UPEN and Hector do not have locked frontiers
-                                    ax_mean_map.scatter(locked_frontier_center[1]-(pd_size-pad_w1), locked_frontier_center[0]-(pd_size-pad_h1), c='#eb4205', s=10)
+                                    ax_mean_map.scatter(locked_frontier_center[1]-pd_size, locked_frontier_center[0]-pd_size, c='#eb4205', s=10)
                                 #ax_mean_map.scatter(cur_pose[1]-(pd_size-pad_w1), cur_pose[0]-(pd_size-pad_h1), c='r', s=5, marker='x')
                                 #ax_mean_map.scatter(next_pose[1]-(pd_size-pad_w1), next_pose[0]-(pd_size-pad_h1), c='g', s=5, marker='x')
                                 if mode not in ['hector', 'hectoraug']: # Hector does not have path planning
-                                    ax_mean_map.plot(plan_y-(pd_size-pad_w1), plan_x-(pd_size-pad_h1), c='#eb4205', linestyle=':')
+                                    ax_mean_map.plot(plan_y-pd_size, plan_x-pd_size, c='#eb4205', linestyle=':')
                                 ax_mean_map.set_title('Mean Map of Prediction Ensembles')
 
                                 #visualize frontiers on the mean_map

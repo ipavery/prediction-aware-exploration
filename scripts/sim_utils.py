@@ -361,6 +361,11 @@ class FrontierPlanner():
         best_ind = -1
         medium_ind = -1
 
+        # No frontier has a path: return no goal, which the explorer treats as no frontier left.
+        if len(path_collection) == 0:
+            return (frontier_region_centers, np.asarray([]), viz_most_flooded_grid,
+                    viz_medium_flooded_grid, best_ind, medium_ind, locked_frontier_center)
+
         # Subsample each path.
         n = pred_vis_config['pathwise_index'] 
         for i in range(len(path_collection)):

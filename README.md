@@ -6,6 +6,8 @@ This repository is built upon the [PIPE Planner](https://github.com/castacks/pip
 
 This is a standalone research repository. Clone this repository directly to reproduce or extend our work.
 
+This version incorporates Dr. Moon's updates from FORTRESS.
+
 ## Installation
 
 ### Clone this repository
