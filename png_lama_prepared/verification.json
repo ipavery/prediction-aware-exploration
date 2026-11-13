@@ -1,0 +1,10 @@
+{
+  "padding_policy": "gray_observation_black_footprint_v2",
+  "python_syntax": "passed, Python 3.6 grammar",
+  "independent_splits": "passed: floor, connected split group and GT hashes",
+  "canonical_gt_and_prior_count": 57,
+  "paired_geometry_samples_checked": 64,
+  "warm_local_loader_ms_per_sample": 19.594,
+  "local_gpu_training": "not run: PyTorch/CUDA unavailable",
+  "unit_tests": "9 passed; see test_png_training.py"
+}

@@ -1,0 +1,40 @@
+{
+  "input_pairs": 29425,
+  "selected_training_folders": [
+    "train_1"
+  ],
+  "counts": {
+    "train": {
+      "pairs": 18181,
+      "groups": 34,
+      "unique_gt": 34
+    },
+    "validate": {
+      "pairs": 2763,
+      "groups": 4,
+      "unique_gt": 4
+    },
+    "test": {
+      "pairs": 8481,
+      "groups": 19,
+      "unique_gt": 19
+    }
+  },
+  "excluded": {},
+  "unique_gt": 57,
+  "known_disagreements": 3965281,
+  "maximum_pixels": 832156,
+  "preparation_seconds": 76.4,
+  "prior_settings": {
+    "method": "closed-envelope",
+    "close_radius": 3,
+    "min_component": 64,
+    "samples": 16,
+    "shift_px": 3,
+    "rotate_deg": 2.0,
+    "scale_jitter": 0.02,
+    "boundary_jitter": 1,
+    "seed": 42
+  },
+  "warning": "Synthetic GT silhouettes measure the utility of an extent prior, not real satellite performance."
+}
