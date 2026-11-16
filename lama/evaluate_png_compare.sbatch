@@ -5,7 +5,8 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:h200:1
+#SBATCH --qos=eng
 #SBATCH --output=logs/png-compare-%j.out
 #SBATCH --error=logs/png-compare-%j.err
 
@@ -21,9 +22,11 @@ if [[ "$SPLIT" != validate && "$SPLIT" != test ]]; then
   echo 'SPLIT must be validate or test' >&2; exit 2
 fi
 cd "$REPO/lama"
+source "$REPO/lama/png_activate_conda.sh"
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 export WANDB_MODE=disabled
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+python -u bin/check_png_training_gpu.py
 python -u bin/evaluate_png_maps.py \
   --manifest "$PREPARED/$SPLIT.json" --data-root "$PNG_DATA_ROOT" \
   --model nosatellite "$NO_SAT_CKPT" --model satellite "$SAT_CKPT" \

@@ -8,6 +8,8 @@ os.environ.setdefault('WANDB_MODE', 'disabled')
 
 import json
 import logging
+import platform
+import sys
 from pathlib import Path
 
 import hydra
@@ -40,6 +42,15 @@ class PngTrainingModule(DefaultInpaintingTrainingModule):
             satellite_shift_px=options.satellite_shift_px, satellite_dropout=options.satellite_dropout, **shared)
         self.val_set = PngMapDataset(options.val_manifest, training=False, limit=options.val_limit, **shared)
         self.shuffle_generator = torch.Generator().manual_seed(config.seed)
+        self.png_optimizer_steps = [0, 0]
+
+    def get_ddp_rank(self):
+        # This PNG runner is single-GPU. Avoid the removed Trainer.num_processes.
+        return self.trainer.global_rank if self.trainer.world_size > 1 else None
+
+    def on_before_optimizer_step(self, optimizer, optimizer_idx):
+        # Lightning 1.9 invokes this separately for the generator and discriminator.
+        self.png_optimizer_steps[optimizer_idx] += 1
 
     def sanity_checking(self):
         # The repository pins Lightning 1.2.9, which calls this running_sanity_check.
@@ -111,7 +122,7 @@ class PngTrainingModule(DefaultInpaintingTrainingModule):
         metrics = {'val_unknown_iou': values['occupied_iou'] or 0.,
                    'val_unknown_f1': values['occupied_f1'] or 0.,
                    'val_unknown_mae': values['unknown_mae'] or 0.}
-        self.log_dict(metrics, prog_bar=True, logger=True)
+        self.log_dict(metrics, prog_bar=True, logger=True, on_step=False, on_epoch=True, batch_size=1)
         if not self.sanity_checking():
             record = dict(epoch=self.current_epoch, global_step=self.global_step,
                           padding_policy=self.config.png_data.padding_policy, counts=pooled, **values)
@@ -122,12 +133,21 @@ class PngTrainingModule(DefaultInpaintingTrainingModule):
 
 @hydra.main(config_path='../configs/training', config_name='png-maps')
 def main(config):
+    if tuple(int(part) for part in pl.__version__.split('.')[:2]) != (1, 9):
+        raise RuntimeError('This PNG runner requires Lightning 1.9.x; activate lama-h200 with Lightning 1.9.5')
+    trainer_options = OmegaConf.to_container(config.trainer.kwargs, resolve=True)
+    # Retain the existing CLI/config setting, but pass it through the supported fit API.
+    resume_path = trainer_options.pop('resume_from_checkpoint', None)
     base_path = config.get('pretrained_generator_path')
-    if base_path and config.trainer.kwargs.get('resume_from_checkpoint'):
+    if base_path and resume_path:
         raise ValueError('Choose base initialization OR resume_from_checkpoint, not both')
     pl.seed_everything(config.seed)
     config.visualizer.outdir = str(Path(config.visualizer.outdir).resolve())
     OmegaConf.save(config, 'config.yaml')
+    Path('runtime_versions.json').write_text(json.dumps(dict(
+        python=sys.version, executable=sys.executable, platform=platform.platform(),
+        torch=torch.__version__, cuda=torch.version.cuda, cudnn=torch.backends.cudnn.version(),
+        lightning=pl.__version__, numpy=np.__version__, wandb=wandb.__version__), indent=2) + '\n')
     csv_logger = CSVLogger('metrics', name='csv')
     tb_logger = TensorBoardLogger(config.location.tb_dir, name=Path.cwd().name)
     loggers = [csv_logger, tb_logger]
@@ -155,8 +175,8 @@ def main(config):
             discriminator=config.get('pretrained_discriminator', 'auto'))
         LOG.info('Initialized base generator; discriminator initialized: %s; source SHA256: %s',
                  initialization['discriminator_initialized'], initialization['sha256'])
-    elif config.trainer.kwargs.get('resume_from_checkpoint'):
-        initialization = dict(kind='resume', checkpoint=str(config.trainer.kwargs.resume_from_checkpoint))
+    elif resume_path:
+        initialization = dict(kind='resume', checkpoint=str(resume_path))
     else:
         initialization = dict(kind='scratch', generator_initialized=False, discriminator_initialized=False)
     Path('initialization.json').write_text(json.dumps(initialization, indent=2, default=str) + '\n')
@@ -166,10 +186,22 @@ def main(config):
     callback = ModelCheckpoint(dirpath='models', monitor='val_unknown_iou', mode='max',
         save_top_k=3, save_last=True, filename='{epoch:03d}-{val_unknown_iou:.4f}')
     trainer = pl.Trainer(callbacks=[callback], logger=loggers,
-                         default_root_dir=str(Path.cwd()), **OmegaConf.to_container(config.trainer.kwargs, resolve=True))
-    trainer.fit(model)
+                         default_root_dir=str(Path.cwd()), **trainer_options)
+    trainer.fit(model, ckpt_path=resume_path)
     Path('best_checkpoint.txt').write_text(callback.best_model_path + '\n')
     Path('last_checkpoint.txt').write_text(callback.last_model_path + '\n')
+    summary = dict(generator_steps=model.png_optimizer_steps[0],
+                   discriminator_steps=model.png_optimizer_steps[1],
+                   best_checkpoint=callback.best_model_path, last_checkpoint=callback.last_model_path,
+                   validation_recorded=Path('validation.jsonl').is_file(),
+                   preview_count=len(list(Path('png_samples').glob('epoch_*/*.png'))))
+    if os.environ.get('SMOKE') == '1':
+        if not (all(model.png_optimizer_steps) and summary['validation_recorded'] and summary['preview_count']
+                and all(path and Path(path).is_file() for path in
+                        (callback.best_model_path, callback.last_model_path))):
+            raise RuntimeError('Smoke run did not complete all optimizer/validation/preview/checkpoint checks: {}'.format(summary))
+        LOG.info('PNG SMOKE PASSED: %s', summary)
+    Path('training_complete.json').write_text(json.dumps(summary, indent=2) + '\n')
     wandb.finish()
 
 

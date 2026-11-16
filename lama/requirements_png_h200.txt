@@ -1,0 +1,45 @@
+# Candidate environment for Linux x86_64, Python 3.9 and NVIDIA H200.
+# Install torch/torchvision from the cu118 index FIRST (see README_H200_REQUIREMENTS.txt).
+# An already installed 2.0.1+cu118 satisfies torch==2.0.1 below.
+# Direct dependencies are pinned; this is not a complete transitive lock file.
+torch==2.0.1
+torchvision==0.15.2
+pytorch-lightning==1.9.5
+torchmetrics==0.11.4
+lightning-utilities==0.9.0
+fsspec[http]==2023.6.0
+
+# Preserve old NumPy aliases and image APIs used by LaMa/imgaug.
+numpy==1.23.5
+scipy==1.10.1
+scikit-image==0.19.3
+scikit-learn==1.2.2
+Pillow==9.5.0
+imageio==2.31.6
+# imgaug requires opencv-python; Albumentations requires opencv-python-headless.
+# Pin both distributions to the same OpenCV release for this legacy dependency graph.
+opencv-python==4.8.1.78
+opencv-python-headless==4.8.1.78
+albumentations==0.5.2
+imgaug==0.4.0
+Shapely==1.8.5.post1
+kornia==0.5.0
+webdataset==0.2.86
+
+# Hydra 1.1/OmegaConf 2.1 retain the repository's ${env:...} resolver/config syntax.
+hydra-core==1.1.2
+omegaconf==2.1.2
+antlr4-python3-runtime==4.8
+PyYAML==6.0.1
+easydict==1.10
+
+# Tracking, previews, tables and TensorBoardLogger.
+wandb==0.17.9
+tensorboard==2.13.0
+protobuf==4.25.3
+pandas==1.5.3
+matplotlib==3.7.5
+joblib==1.3.2
+tqdm==4.66.5
+tabulate==0.9.0
+packaging==23.2
